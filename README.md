@@ -11,7 +11,7 @@
 
 [![Paper](docs/assets/badges/paper.svg)](https://doi.org/10.1109/IROS58592.2024.10801644)
 [![arXiv](docs/assets/badges/arxiv.svg)](https://arxiv.org/abs/2607.17757)
-[![Project](docs/assets/badges/project.svg)](https://github.com/teamROBI/Seg2Grasp)
+[![Project](docs/assets/badges/project.svg)](https://teamrobi.github.io/projects/seg2grasp/)
 [![License: MIT](docs/assets/badges/license.svg)](LICENSE)
 [![Python 3.10](docs/assets/badges/python.svg)](https://www.python.org/)
 
