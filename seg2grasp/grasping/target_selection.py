@@ -23,21 +23,28 @@ class TargetObject:
     rgb_crop: np.ndarray = None
 
 
-def _mask_centroid_3d(mask, pc_img):
-    """3-D centroid (mm) of a mask, sampled at the mask's pixel centroid.
-    Returns None if the sampled point has invalid (zero) depth."""
+def _mask_centroid_3d(mask, pc_img, patch_frac=0.2, min_points=10):
+    """3-D centroid (mm) of a mask, sampled around the mask's pixel centroid.
+
+    Takes the per-axis median of the valid (non-zero depth) points within a small
+    patch (radius ``patch_frac * sqrt(area)``) around the pixel centroid. A single
+    pixel is unreliable on specular or perforated parts, where depth is often
+    missing or wrong; a local median is not, and still tracks the object's centre
+    height (e.g. the top of a ball). Falls back to the whole mask if the patch has
+    too few valid points. Returns None if the mask has too few valid points.
+    """
     ys, xs = np.where(mask)
     if len(ys) == 0:
         return None
-    cy, cx = int(ys.mean()), int(xs.mean())
-    if not mask[cy, cx]:
-        # centroid pixel falls outside a non-convex mask — use the nearest mask pixel
-        k = np.argmin((ys - cy) ** 2 + (xs - cx) ** 2)
-        cy, cx = ys[k], xs[k]
-    xyz = pc_img[cy, cx].astype(np.float32)
-    if xyz[2] <= 0:
-        return None
-    return xyz
+    cy, cx = ys.mean(), xs.mean()
+    r = max(patch_frac * np.sqrt(len(ys)), 3.0)
+    near = (ys - cy) ** 2 + (xs - cx) ** 2 <= r * r
+    for sel in (near, slice(None)):
+        pts = pc_img[ys[sel], xs[sel]]
+        pts = pts[pts[:, 2] > 0]
+        if len(pts) >= min_points:
+            return np.median(pts, axis=0).astype(np.float32)
+    return None
 
 
 def select_target(masks, bboxes, pc_img, rgb_img=None):
