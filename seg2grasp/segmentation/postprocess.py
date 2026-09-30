@@ -11,7 +11,7 @@ import numpy as np
 MIN_MASK_PIXELS = 10          # drop masks smaller than this many pixels
 OVERLAP_MERGE_RATIO = 0.7     # merge j into i if it overlaps >70% of the smaller mask
 REFINE_MIN_AREA = 500         # refine_masks: drop main contour smaller than this
-REFINE_MAX_AREA = 40000       # refine_masks: drop main contour larger than this
+REFINE_MAX_AREA = 250000      # refine_masks: drop main contour larger than this (~60% of 848x480; large parts)
 COMPONENT_MIN_AREA = 150      # keep sub-contours larger than this ...
 COMPONENT_MAX_DIST = 100      # ... and within this distance of the main contour
 

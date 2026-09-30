@@ -64,8 +64,8 @@ def wait_next(commands):
 def main():
     ap = argparse.ArgumentParser(description="Live Seg2Grasp loop (RealSense D435i, seg + grasp).")
     ap.add_argument("--roi", default=None, help="bin crop 'y,x,h,w' (default: full frame)")
-    ap.add_argument("--width", type=int, default=1280)
-    ap.add_argument("--height", type=int, default=720)
+    ap.add_argument("--width", type=int, default=848)
+    ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--fps", type=int, default=15)
     ap.add_argument("--serial", default=None, help="RealSense serial (if several are connected)")
     ap.add_argument("--vacuum-radius", type=float, default=30.0, help="suction cup radius (mm)")
