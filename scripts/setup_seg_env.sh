@@ -20,6 +20,8 @@ CUDA_ARCH="${TORCH_CUDA_ARCH_LIST:-12.0}"   # Blackwell sm_120
 
 echo ">>> Creating Python 3.10 venv at $VENV"
 uv venv --python 3.10 "$VENV"
+# Keep colcon (ROS 2 workspace builds) from crawling the venv's site-packages.
+touch "$REPO/venvs/COLCON_IGNORE"
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 

@@ -1,49 +1,91 @@
-# Seg2Grasp 扩展说明（RealSense D435i）
+# Seg2Grasp 扩展说明（RealSense D435i + ROS 2）
 
-输入 Intel RealSense D435i 的 RGB-D 数据，输出目标物的吸取点（只用分割 + 抓取，不使用 Qwen 分类）。
+以 ROS 2 节点运行：订阅 RealSense D435i 的彩色图与深度图 topic，实时输出目标物的吸取点（只用分割 + 抓取，不使用 Qwen 分类）。
+
+环境：Ubuntu 22.04、ROS 2 Humble、`realsense2_camera`（realsense-ros 4.x）。
 
 ## 环境准备
 
 ```bash
+cd ~/ksdy_ws/ws_seg2grasp/src/Seg2Grasp
 bash scripts/setup_seg_env.sh        # 创建 venvs/seg（无需运行 setup_qwen_env.sh）
-source venvs/seg/bin/activate
-uv pip install pyrealsense2
 bash scripts/download_weights.sh     # 下载分割模型权重到 data/checkpoints/segmentation/
+
+cd ~/ksdy_ws/ws_seg2grasp
+source /opt/ros/humble/setup.bash
+colcon build --packages-select seg2grasp_ros
 ```
+
+> 不要用 `--symlink-install`：该模式生成的节点入口固定为 `/usr/bin/python3`，找不到 venv 中的 torch。
+> 只修改 `seg2grasp/` 下的算法代码无需重新编译；修改 `ros/seg2grasp_ros/` 下的节点或 launch 文件后需重新 `colcon build`。
 
 ## 运行
 
+每个新终端先加载环境（顺序不能乱，venv 必须最后激活）：
+
 ```bash
-source venvs/seg/bin/activate
-python scripts/run_realsense.py                       # 弹窗显示，逐帧处理
-python scripts/run_realsense.py --once --no-gui       # 只处理一帧，打印结果并存图后退出
-python scripts/run_realsense.py --roi 20,140,440,500  # 只处理指定区域 y,x,h,w
+cd ~/ksdy_ws/ws_seg2grasp
+source /opt/ros/humble/setup.bash
+source ~/ksdy_ws/embodied_ws/install/setup.bash   # realsense2_camera 所在工作区
+source install/setup.bash
+source src/Seg2Grasp/venvs/seg/bin/activate
 ```
 
-| 参数 | 说明 |
-|---|---|
-| `--roi y,x,h,w` | 裁剪区域，默认整幅图 |
-| `--width` / `--height` | 相机分辨率，默认 848×480 |
-| `--fps` | 帧率，默认 15 |
-| `--serial` | 多台 RealSense 时指定序列号 |
-| `--vacuum-radius` | 吸盘半径（mm），默认 30 |
-| `--once` | 只处理一帧 |
-| `--no-gui` | 不弹窗，标注图存到 `data/outputs/realsense/` |
+**方式一：一条命令同时启动相机和节点**
 
-| 操作 | 终端 | 图像窗口 |
-|---|---|---|
-| 下一帧 | 回车 | 任意键 |
-| 退出 | `q` + 回车，或 Ctrl+C | `q` / Esc，或关闭窗口 |
+```bash
+ros2 launch seg2grasp_ros seg2grasp.launch.py
+ros2 launch seg2grasp_ros seg2grasp.launch.py roi:=20,140,440,500 vacuum_radius:=20.0
+```
+
+**方式二：相机和节点分开启动**
+
+```bash
+# 终端 1：相机
+ros2 launch realsense2_camera rs_launch.py \
+  pointcloud.enable:=true \
+  depth_module.depth_profile:=848x480x30 \
+  rgb_camera.color_profile:=848x480x30 \
+  spatial_filter.enable:=true \
+  temporal_filter.enable:=true \
+  hole_filling_filter.enable:=true
+
+# 终端 2：节点
+ros2 run seg2grasp_ros suction_node
+ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false   # 或用 launch 只启动节点
+```
+
+| launch 参数 | 说明 |
+|---|---|
+| `launch_camera` | 是否同时启动相机，默认 `true` |
+| `roi` | 彩色图裁剪区域 `y,x,h,w`，默认整幅图 |
+| `vacuum_radius` | 吸盘半径（mm），默认 30 |
+| `show` | 是否显示结果窗口，默认 `true` |
+
+节点参数（`ros2 run ... --ros-args -p 参数:=值`）还包括 `color_topic`、`depth_topic`、`color_info_topic`、`depth_info_topic`，默认对应上面相机启动方式发布的 topic。
+
+退出：在结果窗口按 `q` / Esc、关闭窗口，或在终端按 Ctrl+C。
+
+## 处理方式
+
+- 节点始终处理**最新**的一帧：处理期间到达的帧会被丢弃，处理完立即取下一帧最新数据。
+- 每处理完一帧就刷新结果窗口，窗口始终显示最新结果（左下角显示单帧耗时，当前约 1.3 s/帧）。
+- 深度图会用两个相机的内参和 TF 外参自动对齐到彩色图；若相机启用了 `align_depth.enable:=true`，将 `depth_topic` 设为 `/camera/camera/aligned_depth_to_color/image_raw` 即可跳过对齐。
 
 ## 输出
 
-每帧输出一行 JSON：
+| Topic | 类型 | 说明 |
+|---|---|---|
+| `/seg2grasp/suction_pose` | `geometry_msgs/PoseStamped` | 吸取点位姿，坐标系 `camera_color_optical_frame`，单位 m；姿态的 z 轴为吸取接近方向（指向物体表面内） |
+| `/seg2grasp/result_image` | `sensor_msgs/Image`（bgr8） | 标注后的结果图 |
+
+终端日志每帧输出一行 JSON：
 
 ```json
-{"point_mm": [-57.9, 31.0, 373.0], "normal": [-0.0633, -0.0134, -0.9979], "pixel": [331, 298], "target": 0}
+{"point_mm": [-89.8, -30.7, 515.5], "normal": [0.1446, 0.0287, -0.9891], "pixel": [320, 212], "target": 0}
 ```
 
-- `point_mm`：吸取点，单位 mm，D435i 彩色相机光学坐标系（x 向右、y 向下、z 向前）。用于机械臂时需再乘以手眼标定矩阵。
+- `point_mm`：吸取点，单位 mm，彩色相机光学坐标系（x 向右、y 向下、z 向前）。
 - `normal`：吸取面法向（朝向相机，`z < 0`）。
 - `pixel`：吸取点在原图中的像素位置。
 - `target`：选中物体的编号；无可抓取物体时输出 `no graspable object`。
@@ -51,4 +93,4 @@ python scripts/run_realsense.py --roi 20,140,440,500  # 只处理指定区域 y,
 ## 使用要求
 
 - 工件表面到相机的距离需在 300–1050 mm 之间。
-- 程序选择离相机最近（最高）的物体；画面边缘有杂物时，用 `--roi` 只保留工件区域。
+- 程序选择离相机最近（最高）的物体；画面边缘有杂物时，用 `roi` 只保留工件区域。
