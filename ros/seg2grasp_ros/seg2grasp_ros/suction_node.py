@@ -88,6 +88,7 @@ class SuctionNode(Node):
         self.declare_parameter("depth_info_topic", "/camera/camera/depth/camera_info")
         self.declare_parameter("roi", "")                 # "y,x,h,w" crop of the color image
         self.declare_parameter("vacuum_radius", 30.0)     # suction cup radius (mm)
+        self.declare_parameter("seal_min", 0.98)          # min sealing fraction of the cup disc; 0 = off
         self.declare_parameter("show", True)              # display window
         self.declare_parameter("sync_slop", 0.02)         # color/depth stamp tolerance (s)
 
@@ -97,7 +98,8 @@ class SuctionNode(Node):
         self.show = bool(p("show"))
 
         self.get_logger().info("Loading segmentation model ...")
-        self.pipe = Seg2GraspPipeline(Segmenter(), classifier=None, vacuum_radius=float(p("vacuum_radius")))
+        self.pipe = Seg2GraspPipeline(Segmenter(), classifier=None, vacuum_radius=float(p("vacuum_radius")),
+                                      seal_min=float(p("seal_min")))
 
         self.k_color = self.k_depth = None
         self.depth_frame = None

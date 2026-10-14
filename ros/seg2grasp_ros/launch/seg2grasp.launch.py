@@ -37,6 +37,7 @@ def generate_launch_description():
         parameters=[{
             "roi": ParameterValue(LaunchConfiguration("roi"), value_type=str),
             "vacuum_radius": LaunchConfiguration("vacuum_radius"),
+            "seal_min": LaunchConfiguration("seal_min"),
             "show": LaunchConfiguration("show"),
         }],
     )
@@ -44,6 +45,8 @@ def generate_launch_description():
         DeclareLaunchArgument("launch_camera", default_value="true", description="also start realsense2_camera"),
         DeclareLaunchArgument("roi", default_value="", description="color-image crop 'y,x,h,w' (empty = full frame)"),
         DeclareLaunchArgument("vacuum_radius", default_value="30.0", description="suction cup radius (mm)"),
+        DeclareLaunchArgument("seal_min", default_value="0.98",
+                              description="min fraction of the cup disc that must seal (0 = no seal check)"),
         DeclareLaunchArgument("show", default_value="true", description="show the result window"),
         camera,
         node,

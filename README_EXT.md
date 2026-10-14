@@ -59,7 +59,8 @@ ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false   # 或用 la
 |---|---|
 | `launch_camera` | 是否同时启动相机，默认 `true` |
 | `roi` | 彩色图裁剪区域 `y,x,h,w`，默认整幅图 |
-| `vacuum_radius` | 吸盘半径（mm），默认 30 |
+| `vacuum_radius` | 吸盘半径（mm），默认 30；请设为实际吸盘半径（密封检查按此计算吸盘覆盖范围） |
+| `seal_min` | 密封检查阈值：吸盘圆盘内能密封的像素比例下限，默认 0.98；设为 0 关闭检查 |
 | `show` | 是否显示结果窗口，默认 `true` |
 
 节点参数（`ros2 run ... --ros-args -p 参数:=值`）还包括 `color_topic`、`depth_topic`、`color_info_topic`、`depth_info_topic`，默认对应上面相机启动方式发布的 topic。
@@ -89,6 +90,17 @@ ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false   # 或用 la
 - `normal`：吸取面法向（朝向相机，`z < 0`）。
 - `pixel`：吸取点在原图中的像素位置。
 - `target`：选中物体的编号；无可抓取物体时输出 `no graspable object`。
+
+## 避开弯折与褶皱
+
+候选吸取点的评分中加入了"周边平整度"一项（权重 0.3）：计算吸盘半径 1.5 倍范围内的点到吸取面的偏离（90 分位），偏离越大得分越低。吸盘落在弯折、凸筋、褶皱上或紧挨着它们时，这一项会明显变差，从而优先选择平整区域。
+
+## 密封检查
+
+候选吸取点除了要求局部平整，还要求吸盘覆盖的整个圆盘都能密封：圆盘内的像素必须属于工件、有有效深度，且离吸取面的距离不超过 5 mm。覆盖率低于 `seal_min` 的候选会被排除；若目标物体上没有能密封的位置，输出 `no graspable object`。
+
+- 能识别：吸盘越过工件边缘、跨折痕或台阶、深度相机能测到的开口。
+- 不能识别：深度相机分辨不出的小孔。实测 D435i 在约 475 mm 距离上，对约 10 mm 的小孔给出的深度与周围表面连续，与是否开启滤波无关。
 
 ## 使用要求
 

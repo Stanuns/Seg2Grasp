@@ -42,12 +42,15 @@ class Seg2GraspPipeline:
         classifier: object with ``classify(scene_bgr, crop_bgr) -> dict`` (may be
             None to skip classification).
         vacuum_radius (float): suction-cup radius (mm) passed to the grasp planner.
+        seal_min (float): minimum fraction of the cup disc that must seal
+            (0 disables the planner's seal check).
     """
 
-    def __init__(self, segmenter, classifier=None, vacuum_radius=30.0):
+    def __init__(self, segmenter, classifier=None, vacuum_radius=30.0, seal_min=0.98):
         self.segmenter = segmenter
         self.classifier = classifier
         self.vacuum_radius = vacuum_radius
+        self.seal_min = seal_min
 
     def run(self, rgb, depth, pc, classify=True, visualize=False, rng=None):
         """Run the full pipeline on one frame.
@@ -73,7 +76,7 @@ class Seg2GraspPipeline:
 
         suction = estimate_suction_point(
             target.pc_crop, mask=target.mask_crop, vacuum_radius=self.vacuum_radius,
-            rng=rng, visualize=visualize, rgb_img=target.rgb_crop)
+            seal_min=self.seal_min, rng=rng, visualize=visualize, rgb_img=target.rgb_crop)
         if suction is None:
             return None
 

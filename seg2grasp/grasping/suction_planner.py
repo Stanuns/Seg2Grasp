@@ -51,7 +51,8 @@ def _voxel_downsample(points, voxel):
     return points[np.sort(idx)]
 
 
-def suction_candidates(surface, vacuum_radius=30.0, spacing=None, min_points=8, flat_tol=3.0):
+def suction_candidates(surface, vacuum_radius=30.0, spacing=None, min_points=8, flat_tol=3.0,
+                       margin=1.5):
     """Evaluate geometrically-uniform candidate suction points over a surface.
 
     Seeds are placed uniformly (one per ``spacing``-sized voxel, default = the cup
@@ -59,34 +60,108 @@ def suction_candidates(surface, vacuum_radius=30.0, spacing=None, min_points=8, 
     ``vacuum_radius`` and is a *valid* candidate if it has enough points and the
     patch is flat enough (mean abs. distance to its fitted plane ≤ ``flat_tol`` mm).
 
-    Returns a list of dicts per candidate: ``{center, point, normal, flat, n,
-    valid}`` where ``point`` is the patch centre of gravity (mean of its points)
-    and ``normal`` is that patch's camera-facing unit normal.
+    ``margin_dev`` measures how flat the surroundings are: the 90th-percentile
+    distance to the patch plane of the points within ``margin * vacuum_radius``.
+    A patch on, or right next to, a bend, rib or crease has a flat-looking core
+    but a large ``margin_dev``, because the surface leaves the plane around it.
+
+    Returns a list of dicts per candidate: ``{center, point, normal, flat,
+    margin_dev, n, valid}`` where ``point`` is the patch centre of gravity (mean
+    of its points) and ``normal`` is that patch's camera-facing unit normal.
     """
     spacing = spacing or vacuum_radius
     seeds = _voxel_downsample(surface, spacing)
     out = []
     for s in seeds:
-        near = surface[np.linalg.norm(surface - s, axis=1) < vacuum_radius]
+        d = np.linalg.norm(surface - s, axis=1)
+        near = surface[d < vacuum_radius]
         if len(near) < min_points:
             continue
         plane = fit_plane_lstsq(near)
         flat = float(np.abs(near @ plane[:3] + plane[3]).mean())
+        wide = surface[d < margin * vacuum_radius]
+        margin_dev = float(np.percentile(np.abs(wide @ plane[:3] + plane[3]), 90))
         out.append(dict(center=s, point=near.mean(axis=0), normal=_to_camera_facing(plane),
-                        flat=flat, n=int(len(near)), valid=bool(flat <= flat_tol)))
+                        flat=flat, margin_dev=margin_dev, n=int(len(near)), valid=bool(flat <= flat_tol)))
     return out
 
 
-def score_candidates(candidates, centroid, w_angle=0.5, w_dist=0.2, w_count=0.3):
-    """Score valid suction candidates (paper Eq. 2): weighted sum of the surface
-    angle (how top-facing the patch normal is), proximity to the object centre of
-    gravity, and graspable-point count. Weights sum to 1. Fills
-    ``candidate['score']`` and returns the valid list.
+def _pixel_model(pc_img, max_samples=5000):
+    """Recover the pinhole mapping ``u = fx*x/z + cx, v = fy*y/z + cy`` of an
+    organized cloud, so pixels without depth can still be cast as rays. Works on
+    crops (the crop offset folds into ``cx, cy``). None if it cannot be fitted."""
+    v, u = np.nonzero(pc_img[:, :, 2] > 0)
+    if len(u) < 50:
+        return None
+    step = max(len(u) // max_samples, 1)
+    u, v = u[::step], v[::step]
+    p = pc_img[v, u].astype(np.float64)
+    a, b = p[:, 0] / p[:, 2], p[:, 1] / p[:, 2]
+    if np.ptp(a) < 1e-6 or np.ptp(b) < 1e-6:
+        return None
+    fx, cx = np.polyfit(a, u, 1)
+    fy, cy = np.polyfit(b, v, 1)
+    return fx, cx, fy, cy
+
+
+def seal_ratio(pc_img, member, model, point, normal, vacuum_radius=30.0, tol=5.0):
+    """Fraction of the suction-cup disc that can seal.
+
+    The cup is a disc of ``vacuum_radius`` centred on ``point`` in the plane with
+    ``normal``. Every pixel whose camera ray hits that disc is checked: it seals
+    only if it is on the object (``member``), has valid depth, and its measured
+    point lies within ``tol`` mm of the plane. Holes (no depth, or depth seen
+    through the part), edges (off the object) and steps or creases (off the
+    plane) all lower the ratio.
+
+    Args:
+        pc_img (np.ndarray): organized point cloud [H, W, 3] (mm).
+        member (np.ndarray): [H, W] bool, pixels belonging to the object.
+        model (tuple): ``(fx, cx, fy, cy)`` from :func:`_pixel_model`.
+        point, normal (np.ndarray): cup centre (mm) and unit plane normal.
+
+    Returns:
+        float in [0, 1].
+    """
+    fx, cx, fy, cy = model
+    h, w = member.shape
+    point, normal = np.asarray(point, np.float64), np.asarray(normal, np.float64)
+    z = point[2]
+    u0, v0 = fx * point[0] / z + cx, fy * point[1] / z + cy
+    # a tilted disc projects inside this window (its nearest part is at depth >= z - r)
+    zmin = max(z - vacuum_radius, 1.0)
+    ru, rv = vacuum_radius * abs(fx) / zmin + 1, vacuum_radius * abs(fy) / zmin + 1
+    uu, vv = np.meshgrid(np.arange(np.floor(u0 - ru), np.ceil(u0 + ru) + 1, dtype=np.int64),
+                         np.arange(np.floor(v0 - rv), np.ceil(v0 + rv) + 1, dtype=np.int64))
+    rays = np.stack([(uu - cx) / fx, (vv - cy) / fy, np.ones(uu.shape)], axis=-1)
+    denom = rays @ normal
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = (point @ normal) / denom                      # ray-plane intersection
+    hit = rays * t[..., None]
+    in_disc = (np.abs(denom) > 1e-9) & (t > 0) & (np.linalg.norm(hit - point, axis=-1) <= vacuum_radius)
+    if not in_disc.any():
+        return 0.0
+    inside = in_disc & (uu >= 0) & (uu < w) & (vv >= 0) & (vv < h)
+    ui, vi = uu[inside], vv[inside]
+    pts = pc_img[vi, ui]
+    good = member[vi, ui] & (pts[:, 2] > 0) & (np.abs((pts - point) @ normal) <= tol)
+    return float(good.sum() / in_disc.sum())             # disc pixels outside the crop count as unsealed
+
+
+def score_candidates(candidates, centroid, w_angle=0.4, w_dist=0.15, w_count=0.15,
+                     w_flat=0.3, flat_tol=3.0):
+    """Score valid suction candidates (paper Eq. 2, plus a flatness term): weighted
+    sum of the surface angle (how top-facing the patch normal is), proximity to
+    the object centre of gravity, graspable-point count, and flatness of the
+    patch's surroundings. Weights sum to 1. Fills ``candidate['score']`` and
+    returns the valid list.
 
     The angle term is ``|normal_z|`` — the alignment of the patch normal with the
     camera/approach axis — so a top-facing patch (normal pointing straight up at
     the camera) scores highest and a steep side patch on a round object scores
-    low. Local flatness is already enforced by the validity gate (``flat_tol``).
+    low. The flatness term is ``1 - margin_dev / flat_tol`` (clipped to [0, 1]):
+    it steers the cup away from bends, ribs and creases, which otherwise tie with
+    flat faces on the other three terms.
     """
     valid = [c for c in candidates if c["valid"]]
     if not valid:
@@ -96,7 +171,8 @@ def score_candidates(candidates, centroid, w_angle=0.5, w_dist=0.2, w_count=0.3)
     s_angle = np.array([abs(c["normal"][2]) for c in valid])   # 1 = top-facing, 0 = vertical wall
     s_dist = 1 - dists / (dists.max() + 1e-9)                   # closer to CoG -> more stable
     s_count = counts / (counts.max() + 1e-9)                    # more support -> better
-    scores = w_angle * s_angle + w_dist * s_dist + w_count * s_count
+    s_flat = np.clip(1 - np.array([c["margin_dev"] for c in valid]) / flat_tol, 0, 1)  # 1 = flat surroundings
+    scores = w_angle * s_angle + w_dist * s_dist + w_count * s_count + w_flat * s_flat
     for c, sc in zip(valid, scores):
         c["score"] = float(sc)
     return valid
@@ -151,14 +227,17 @@ def _to_camera_facing(plane):
 
 def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
                            z_near=300.0, z_far=1050.0, vacuum_radius=30.0,
-                           threshold=3.0, w_angle=0.5, w_dist=0.2, w_count=0.3,
+                           threshold=3.0, w_angle=0.4, w_dist=0.15, w_count=0.15, w_flat=0.3,
+                           seal_min=0.98, seal_tol=5.0,
                            rng=None, visualize=False, rgb_img=None, debug=None):
     """Estimate the optimal suction pose for a single target object.
 
     Evaluates geometrically-uniform candidate suction points over the object
     surface and picks the best by a weighted score (paper Eq. 2): surface angle
     (how top-facing the patch normal is) + proximity to the object's centre of
-    gravity + graspable-point count. (Local flatness gates candidate validity.)
+    gravity + graspable-point count. Local flatness and a seal check (the whole
+    cup disc must lie on the object, with valid depth, on the patch plane) gate
+    candidate validity.
 
     Args:
         pc_img (np.ndarray): organized point cloud [H, W, 3] (mm) of the target
@@ -169,8 +248,12 @@ def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
         z_near, z_far (float): metric depth band (mm) used when ``mask`` is None.
         vacuum_radius (float): suction cup radius (mm) for the disc search.
         threshold (float): plane inlier / flatness tolerance (mm).
-        w_angle, w_dist, w_count (float): score weights (sum to 1) for flatness,
-            centroid proximity, and support count.
+        w_angle, w_dist, w_count, w_flat (float): score weights (sum to 1) for
+            surface angle, centroid proximity, support count, and flatness of the
+            patch's surroundings (see :func:`score_candidates`).
+        seal_min (float): minimum fraction of the cup disc that must seal (see
+            :func:`seal_ratio`); 0 disables the seal check.
+        seal_tol (float): max distance (mm) of a sealing pixel from the cup plane.
         rng (np.random.Generator, optional): only used by the RANSAC fallback.
         visualize (bool): draw the Open3D grasp visualization.
         rgb_img (np.ndarray, optional): color crop, only for visualization.
@@ -180,12 +263,13 @@ def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
 
     Returns:
         SuctionPose: contact point (mm) and camera-facing unit normal.
-        Returns ``None`` if the object has too few valid points.
+        Returns ``None`` if the object has too few valid points, or (with the seal
+        check on) no spot where the cup can seal.
     """
+    in_band = (pc_img[:, :, 2] > z_near) & (pc_img[:, :, 2] < z_far)
+    member = in_band & mask.astype(bool) if mask is not None else in_band
     if mask is not None:
-        m = mask.astype(bool)
-        surface = pc_img[m]
-        surface = surface[(surface[:, 2] > z_near) & (surface[:, 2] < z_far)].reshape(-1, 3)
+        surface = pc_img[member].reshape(-1, 3)
     else:
         surface = remove_background(pc_img, z_near, z_far)
 
@@ -200,11 +284,27 @@ def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
     # graspable-point count.
     centroid = surface.mean(axis=0)
     candidates = suction_candidates(surface, vacuum_radius=vacuum_radius, flat_tol=threshold)
-    scored = score_candidates(candidates, centroid, w_angle, w_dist, w_count)
+
+    # Seal check: drop flat candidates whose cup disc covers holes, edges or steps.
+    model = _pixel_model(pc_img) if seal_min > 0 else None
+    for c in candidates:
+        c["seal"] = None
+        if model is not None and c["valid"]:
+            c["seal"] = seal_ratio(pc_img, member, model, c["point"], c["normal"],
+                                   vacuum_radius=vacuum_radius, tol=seal_tol)
+            c["valid"] = c["seal"] >= seal_min
+    scored = score_candidates(candidates, centroid, w_angle, w_dist, w_count, w_flat, flat_tol=threshold)
 
     if scored:
         best = max(scored, key=lambda c: c["score"])
         point, normal = best["point"], best["normal"]
+    elif model is not None:
+        # nowhere on this object can the cup seal: better no grasp than a leaking one
+        if debug is not None:
+            debug.update(surface=surface, centroid=centroid, candidates=candidates,
+                         disc=None, plane_surface=None, point=None, normal=None,
+                         vacuum_radius=vacuum_radius)
+        return None
     else:
         # fallback: densest flat cup-sized disc (RANSAC), else geometric center
         plane_surface, plane, disc_idx, iterations = ransac_disc_fit(
