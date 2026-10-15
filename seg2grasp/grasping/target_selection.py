@@ -47,8 +47,11 @@ def _mask_centroid_3d(mask, pc_img, patch_frac=0.2, min_points=10):
     return None
 
 
-def select_target(masks, bboxes, pc_img, rgb_img=None):
-    """Select the most elevated (nearest-camera) object as the grasp target.
+def rank_targets(masks, bboxes, pc_img, rgb_img=None):
+    """All objects with a valid 3-D centroid, most elevated (nearest-camera) first.
+
+    Lets the caller fall back to the next object when the most elevated one
+    cannot be grasped (e.g. no spot where the suction cup seals).
 
     Args:
         masks (np.ndarray | list): N boolean masks [H, W].
@@ -57,34 +60,33 @@ def select_target(masks, bboxes, pc_img, rgb_img=None):
         rgb_img (np.ndarray, optional): scene image [H, W, 3] to crop too.
 
     Returns:
-        TargetObject, or None if no mask has a valid 3-D centroid.
+        list of TargetObject, sorted by centroid depth (ascending); may be empty.
     """
-    if len(masks) == 0:
-        return None
+    ranked = []
+    for idx, mask in enumerate(masks):
+        mask = np.asarray(mask, dtype=bool)
+        c = _mask_centroid_3d(mask, pc_img)
+        if c is None or np.sum(bboxes[idx]) == 0:
+            continue
+        x0, y0, x1, y1 = np.round(bboxes[idx]).astype(int)
+        ranked.append(TargetObject(
+            index=idx,
+            bbox=np.array([x0, y0, x1, y1]),
+            centroid=c,
+            pc_crop=pc_img[y0:y1, x0:x1],
+            mask_crop=mask[y0:y1, x0:x1],
+            rgb_crop=(rgb_img[y0:y1, x0:x1] if rgb_img is not None else None),
+        ))
+    ranked.sort(key=lambda t: t.centroid[2])      # smallest depth = most elevated
+    return ranked
 
-    centroids, valid = [], []
-    for i, mask in enumerate(masks):
-        c = _mask_centroid_3d(np.asarray(mask, dtype=bool), pc_img)
-        if c is None or np.sum(bboxes[i]) == 0:
-            centroids.append(np.array([0.0, 0.0, np.inf]))  # never selected
-            valid.append(False)
-        else:
-            centroids.append(c)
-            valid.append(True)
 
-    if not any(valid):
-        return None
+def select_target(masks, bboxes, pc_img, rgb_img=None):
+    """Select the most elevated (nearest-camera) object as the grasp target.
 
-    centroids = np.array(centroids)
-    idx = int(np.argmin(centroids[:, 2]))         # smallest depth = most elevated
-
-    x0, y0, x1, y1 = np.round(bboxes[idx]).astype(int)
-    mask = np.asarray(masks[idx], dtype=bool)
-    return TargetObject(
-        index=idx,
-        bbox=np.array([x0, y0, x1, y1]),
-        centroid=centroids[idx],
-        pc_crop=pc_img[y0:y1, x0:x1],
-        mask_crop=mask[y0:y1, x0:x1],
-        rgb_crop=(rgb_img[y0:y1, x0:x1] if rgb_img is not None else None),
-    )
+    Returns:
+        TargetObject, or None if no mask has a valid 3-D centroid.
+        (Arguments as in :func:`rank_targets`.)
+    """
+    ranked = rank_targets(masks, bboxes, pc_img, rgb_img)
+    return ranked[0] if ranked else None

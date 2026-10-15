@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .grasping.suction_planner import estimate_suction_point, SuctionPose
-from .grasping.target_selection import select_target, TargetObject
+from .grasping.target_selection import rank_targets, TargetObject
 
 
 @dataclass
@@ -64,20 +64,24 @@ class Seg2GraspPipeline:
             visualize (bool): show the Open3D grasp visualization.
 
         Returns:
-            Seg2GraspResult, or None if no object could be segmented/selected.
+            Seg2GraspResult for the most elevated object that has a suction
+            point, or None if no segmented object has one.
         """
         masks, bboxes, seg_vis = self.segmenter.segment(rgb, depth)
         if masks is None or len(masks) == 0:
             return None
 
-        target = select_target(masks, bboxes, pc, rgb_img=rgb)
+        # Most elevated object first; if the cup cannot seal anywhere on it (e.g. a
+        # small or curved object), fall back to the next most elevated one.
+        target = suction = None
+        for candidate in rank_targets(masks, bboxes, pc, rgb_img=rgb):
+            suction = estimate_suction_point(
+                candidate.pc_crop, mask=candidate.mask_crop, vacuum_radius=self.vacuum_radius,
+                seal_min=self.seal_min, rng=rng, visualize=visualize, rgb_img=candidate.rgb_crop)
+            if suction is not None:
+                target = candidate
+                break
         if target is None:
-            return None
-
-        suction = estimate_suction_point(
-            target.pc_crop, mask=target.mask_crop, vacuum_radius=self.vacuum_radius,
-            seal_min=self.seal_min, rng=rng, visualize=visualize, rgb_img=target.rgb_crop)
-        if suction is None:
             return None
 
         label, confidence = None, None
