@@ -39,6 +39,8 @@ def generate_launch_description():
             "vacuum_radius": LaunchConfiguration("vacuum_radius"),
             "seal_min": LaunchConfiguration("seal_min"),
             "show": LaunchConfiguration("show"),
+            "fp16": LaunchConfiguration("fp16"),
+            "seg_min_size": LaunchConfiguration("seg_min_size"),
         }],
     )
     return LaunchDescription([
@@ -48,6 +50,9 @@ def generate_launch_description():
         DeclareLaunchArgument("seal_min", default_value="0.98",
                               description="min fraction of the cup disc that must seal (0 = no seal check)"),
         DeclareLaunchArgument("show", default_value="true", description="show the result window"),
+        DeclareLaunchArgument("fp16", default_value="true", description="float16 segmentation inference (~3x faster)"),
+        DeclareLaunchArgument("seg_min_size", default_value="0",
+                              description="segmentation input short edge in px; 0 = model default 800 (smaller = faster, coarser)"),
         camera,
         node,
     ])

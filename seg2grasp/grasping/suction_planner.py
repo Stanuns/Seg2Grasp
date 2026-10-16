@@ -9,9 +9,11 @@ graspable-point count. A RANSAC cup-disc search is kept as a fallback.
 
 Main entry point: :func:`estimate_suction_point`.
 """
+import itertools
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 
 @dataclass
@@ -71,19 +73,60 @@ def suction_candidates(surface, vacuum_radius=30.0, spacing=None, min_points=8, 
     """
     spacing = spacing or vacuum_radius
     seeds = _voxel_downsample(surface, spacing)
-    out = []
-    for s in seeds:
-        d = np.linalg.norm(surface - s, axis=1)
-        near = surface[d < vacuum_radius]
-        if len(near) < min_points:
-            continue
-        plane = fit_plane_lstsq(near)
-        flat = float(np.abs(near @ plane[:3] + plane[3]).mean())
-        wide = surface[d < margin * vacuum_radius]
-        margin_dev = float(np.percentile(np.abs(wide @ plane[:3] + plane[3]), 90))
-        out.append(dict(center=s, point=near.mean(axis=0), normal=_to_camera_facing(plane),
-                        flat=flat, margin_dev=margin_dev, n=int(len(near)), valid=bool(flat <= flat_tol)))
-    return out
+    n_seeds = len(seeds)
+    if n_seeds == 0:
+        return []
+
+    # All seeds at once (vectorised; a per-seed Python loop dominated the frame time
+    # for small cups). Flatten every seed's neighbourhood into one array, tagged
+    # with its seed id, and reduce per seed with bincount.
+    neighbourhoods = cKDTree(surface).query_ball_point(seeds, margin * vacuum_radius)
+    lens = np.fromiter(map(len, neighbourhoods), np.int64, n_seeds)
+    gid = np.repeat(np.arange(n_seeds), lens)
+    pts = surface[np.fromiter(itertools.chain.from_iterable(neighbourhoods), np.int64, lens.sum())]
+    pts = pts.astype(np.float64)
+    dist = np.linalg.norm(pts - seeds[gid], axis=1)
+    keep = dist < margin * vacuum_radius
+    gid, pts, dist = gid[keep], pts[keep], dist[keep]
+    near = dist < vacuum_radius
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+
+    def per_seed(w, sel=near):
+        return np.bincount(gid[sel], weights=w[sel], minlength=n_seeds)
+
+    n = np.bincount(gid[near], minlength=n_seeds).astype(np.float64)
+    sx, sy, sz = per_seed(x), per_seed(y), per_seed(z)
+    # least-squares plane z = a*x + b*y + c per seed via the normal equations
+    # (pinv = lstsq's minimum-norm solution, also for degenerate patches)
+    A = np.stack([np.stack([per_seed(x * x), per_seed(x * y), sx], -1),
+                  np.stack([per_seed(x * y), per_seed(y * y), sy], -1),
+                  np.stack([sx, sy, n], -1)], axis=1)
+    rhs = np.stack([per_seed(x * z), per_seed(y * z), sz], -1)
+    ok = n >= min_points
+    coef = np.zeros((n_seeds, 3))
+    if ok.any():
+        coef[ok] = (np.linalg.pinv(A[ok]) @ rhs[ok][..., None])[..., 0]
+    a, b, c = coef[:, 0], coef[:, 1], coef[:, 2]
+    norm = np.sqrt(a * a + b * b + 1.0)
+    res = np.abs(z - (a[gid] * x + b[gid] * y + c[gid])) / norm[gid]   # point-to-plane distance
+
+    flat = per_seed(res) / np.maximum(n, 1)
+    # 90th percentile of the residuals within the margin, per seed (np.percentile's
+    # linear interpolation on each seed's sorted residuals)
+    order = np.lexsort((res, gid))
+    res_sorted = res[order]
+    counts = np.bincount(gid, minlength=n_seeds)
+    starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
+    pos = 0.9 * np.maximum(counts - 1, 0)
+    lo, hi = np.floor(pos).astype(np.int64), np.ceil(pos).astype(np.int64)
+    take = lambda k: res_sorted[np.minimum(starts + k, len(res_sorted) - 1)]
+    margin_dev = take(lo) + (take(hi) - take(lo)) * (pos - lo)
+
+    centre = np.stack([sx, sy, sz], -1) / np.maximum(n, 1)[:, None]
+    normal = np.stack([a, b, -np.ones_like(a)], -1) / norm[:, None]   # camera-facing (z < 0)
+    return [dict(center=seeds[i], point=centre[i], normal=normal[i], flat=float(flat[i]),
+                 margin_dev=float(margin_dev[i]), n=int(n[i]), valid=bool(flat[i] <= flat_tol))
+            for i in np.flatnonzero(ok)]
 
 
 def _pixel_model(pc_img, max_samples=5000):
@@ -285,18 +328,27 @@ def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
     centroid = surface.mean(axis=0)
     candidates = suction_candidates(surface, vacuum_radius=vacuum_radius, flat_tol=threshold)
 
-    # Seal check: drop flat candidates whose cup disc covers holes, edges or steps.
+    scored = score_candidates(candidates, centroid, w_angle, w_dist, w_count, w_flat, flat_tol=threshold)
+
+    # Seal check, best score first: the first flat candidate whose cup disc seals
+    # (no holes, edges or steps under it) wins, so usually only a few are checked.
+    # Unchecked candidates keep seal=None.
     model = _pixel_model(pc_img) if seal_min > 0 else None
     for c in candidates:
         c["seal"] = None
-        if model is not None and c["valid"]:
+    best = None
+    if model is not None:
+        for c in sorted(scored, key=lambda c: -c["score"]):
             c["seal"] = seal_ratio(pc_img, member, model, c["point"], c["normal"],
                                    vacuum_radius=vacuum_radius, tol=seal_tol)
             c["valid"] = c["seal"] >= seal_min
-    scored = score_candidates(candidates, centroid, w_angle, w_dist, w_count, w_flat, flat_tol=threshold)
-
-    if scored:
+            if c["valid"]:
+                best = c
+                break
+    elif scored:
         best = max(scored, key=lambda c: c["score"])
+
+    if best is not None:
         point, normal = best["point"], best["normal"]
     elif model is not None:
         # nowhere on this object can the cup seal: better no grasp than a leaking one

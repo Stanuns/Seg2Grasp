@@ -68,6 +68,15 @@ class Seg2GraspPipeline:
             point, or None if no segmented object has one.
         """
         masks, bboxes, seg_vis = self.segmenter.segment(rgb, depth)
+        return self.grasp(rgb, pc, masks, bboxes, seg_vis=seg_vis, classify=classify,
+                          visualize=visualize, rng=rng)
+
+    def grasp(self, rgb, pc, masks, bboxes, seg_vis=None, classify=True, visualize=False, rng=None):
+        """Target selection -> suction planning -> classification on given masks.
+
+        The part of :meth:`run` after segmentation, so a caller can segment the
+        next frame while this runs on the current one.
+        """
         if masks is None or len(masks) == 0:
             return None
 

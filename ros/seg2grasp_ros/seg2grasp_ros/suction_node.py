@@ -3,9 +3,10 @@
 Subscribes to the RealSense color image, depth image and both camera_infos,
 registers the depth into the color camera (skipped when it already is, e.g. with
 ``align_depth.enable:=true``), runs segmentation -> target selection -> suction
-planning, and publishes the result. Only the newest frame is processed: frames
-that arrive while one is being processed are dropped, and the window always
-shows the latest result.
+planning, and publishes the result. Two-stage pipeline: a worker thread segments
+the newest frame (GPU, float16 by default) while the main thread plans the suction
+point on the previous one. Frames that arrive while busy are dropped, and the
+window always shows the latest result.
 
 Publishes:
     ~/suction_pose  geometry_msgs/PoseStamped  suction point (m) in the color optical
@@ -18,6 +19,7 @@ Publishes:
 
 Quit with q/Esc in the window, by closing the window, or Ctrl+C.
 """
+import array
 import json
 import threading
 import time
@@ -65,7 +67,9 @@ def image_to_numpy(msg):
 def numpy_to_image(img, header):
     msg = Image(header=header, height=img.shape[0], width=img.shape[1], encoding="bgr8",
                 is_bigendian=0, step=img.shape[1] * 3)
-    msg.data = np.ascontiguousarray(img).tobytes()
+    data = array.array("B")
+    data.frombytes(np.ascontiguousarray(img).tobytes())
+    msg.data = data       # array.array is taken as-is; bytes are converted per element (~50 ms)
     return msg
 
 
@@ -91,6 +95,8 @@ class SuctionNode(Node):
         self.declare_parameter("seal_min", 0.98)          # min sealing fraction of the cup disc; 0 = off
         self.declare_parameter("show", True)              # display window
         self.declare_parameter("sync_slop", 0.02)         # color/depth stamp tolerance (s)
+        self.declare_parameter("fp16", True)              # float16 inference (~3x faster segmentation)
+        self.declare_parameter("seg_min_size", 0)         # segmentation input short edge; 0 = model default (800)
 
         p = lambda name: self.get_parameter(name).value
         roi = p("roi").strip()
@@ -98,7 +104,8 @@ class SuctionNode(Node):
         self.show = bool(p("show"))
 
         self.get_logger().info("Loading segmentation model ...")
-        self.pipe = Seg2GraspPipeline(Segmenter(), classifier=None, vacuum_radius=float(p("vacuum_radius")),
+        segmenter = Segmenter(fp16=bool(p("fp16")), min_size=int(p("seg_min_size")) or None)
+        self.pipe = Seg2GraspPipeline(segmenter, classifier=None, vacuum_radius=float(p("vacuum_radius")),
                                       seal_min=float(p("seal_min")))
 
         self.k_color = self.k_depth = None
@@ -107,6 +114,11 @@ class SuctionNode(Node):
         self._lock = threading.Lock()
         self._latest = None
         self._seq = 0
+        self._new_frame = threading.Event()
+        self._stop = threading.Event()
+        self._handoff = threading.Condition()
+        self._segmented = None          # newest segmented frame awaiting grasp planning
+        self._last_out = self._period = None
 
         self.create_subscription(CameraInfo, p("color_info_topic"), self._on_color_info, INFO_QOS)
         self.create_subscription(CameraInfo, p("depth_info_topic"), self._on_depth_info, INFO_QOS)
@@ -135,12 +147,13 @@ class SuctionNode(Node):
         with self._lock:
             self._latest = (color_msg, depth_msg)
             self._seq += 1
+        self._new_frame.set()
 
     def latest(self):
         with self._lock:
             return self._seq, self._latest
 
-    # --- processing (main thread) ---
+    # --- stage 1 (worker thread): preprocessing + segmentation of the newest frame ---
     def _depth_to_color(self, depth, color_msg, depth_msg):
         """Depth (mm) on the color image grid, registering it if it is not already."""
         if depth_msg.header.frame_id == color_msg.header.frame_id and depth.shape == (color_msg.height, color_msg.width):
@@ -163,12 +176,11 @@ class SuctionNode(Node):
         return register_depth_to_color(depth, self.k_depth, self.k_color, *self.extrinsics,
                                        (color_msg.height, color_msg.width))
 
-    def process(self, color_msg, depth_msg):
-        """Run Seg2Grasp on one frame pair; returns the annotated image (or None if not ready)."""
+    def _prepare(self, color_msg, depth_msg):
+        """Frame pair -> (rgb BGR, depth mm, organized cloud mm) on the color grid, ROI-cropped."""
         if self.k_color is None:
             self.get_logger().warn("Waiting for camera_info ...", throttle_duration_sec=2.0)
             return None
-        t0 = time.perf_counter()
         rgb = image_to_numpy(color_msg)
         if color_msg.encoding == "rgb8":
             rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -182,12 +194,57 @@ class SuctionNode(Node):
         if self.roi:
             y, x, h, w = self.roi
             rgb, depth, pc = rgb[y:y + h, x:x + w], depth[y:y + h, x:x + w], pc[y:y + h, x:x + w]
+        return rgb, depth, pc
 
-        result = self.pipe.run(rgb, depth, pc, classify=False)
-        dt = time.perf_counter() - t0
+    def segment_loop(self):
+        """Keep segmenting the newest frame and hand the result to the main thread,
+        so segmentation of frame N+1 (GPU) overlaps grasp planning of frame N (CPU)."""
+        last_seq = 0
+        while not self._stop.is_set():
+            self._new_frame.wait(timeout=0.1)
+            self._new_frame.clear()
+            seq, frames = self.latest()
+            if seq == last_seq or frames is None:
+                continue
+            last_seq = seq
+            try:
+                t0 = time.perf_counter()
+                prepared = self._prepare(*frames)
+                if prepared is None:
+                    continue
+                rgb, depth, pc = prepared
+                masks, bboxes, _ = self.pipe.segmenter.segment(rgb, depth, return_vis=False)
+            except Exception as e:                          # keep the loop alive; report and go on
+                self.get_logger().error(f"segmentation failed: {e!r}", throttle_duration_sec=2.0)
+                continue
+            with self._handoff:
+                self._segmented = (frames[0].header, rgb, pc, masks, bboxes, t0)
+                self._handoff.notify()
+
+    def take_segmented(self, timeout):
+        """Newest segmented frame not yet planned, or None after ``timeout`` s."""
+        with self._handoff:
+            if self._segmented is None:
+                self._handoff.wait(timeout)
+            item, self._segmented = self._segmented, None
+            return item
+
+    # --- stage 2 (main thread): grasp planning, publishing ---
+    def finish(self, item):
+        """Plan the suction point on a segmented frame, publish it; returns the annotated image."""
+        header, rgb, pc, masks, bboxes, t0 = item
+        result = self.pipe.grasp(rgb, pc, masks, bboxes, classify=False)
+        now = time.perf_counter()
+        latency = (now - t0) * 1000                          # from start of preprocessing
+        if self._last_out is not None:
+            dt = now - self._last_out
+            self._period = dt if self._period is None else 0.8 * self._period + 0.2 * dt
+        self._last_out = now
+        rate = f"{1.0 / self._period:.1f} Hz, " if self._period else ""
+        timing = f"  ({rate}latency {latency:.0f} ms)"
 
         if result is None:
-            self.get_logger().info(f"no graspable object  ({dt * 1000:.0f} ms)")
+            self.get_logger().info("no graspable object" + timing)
             vis = rgb.copy()
             cv2.putText(vis, "no graspable object", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         else:
@@ -195,9 +252,8 @@ class SuctionNode(Node):
             u = int(round(p[0] / p[2] * self.k_color[0, 0] + self.k_color[0, 2]))
             v = int(round(p[1] / p[2] * self.k_color[1, 1] + self.k_color[1, 2]))
             self.get_logger().info(json.dumps({"point_mm": p.round(1).tolist(), "normal": n.round(4).tolist(),
-                                               "pixel": [u, v], "target": result.target.index})
-                                   + f"  ({dt * 1000:.0f} ms)")
-            pose = PoseStamped(header=color_msg.header)
+                                               "pixel": [u, v], "target": result.target.index}) + timing)
+            pose = PoseStamped(header=header)
             pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = (p / 1000.0).tolist()
             qx, qy, qz, qw = approach_quaternion(n)
             pose.pose.orientation.x, pose.pose.orientation.y = float(qx), float(qy)
@@ -205,9 +261,9 @@ class SuctionNode(Node):
             self.pose_pub.publish(pose)
             vis = annotate_result(rgb, result, pc)
 
-        cv2.putText(vis, f"{dt * 1000:.0f} ms/frame", (10, vis.shape[0] - 10),
+        cv2.putText(vis, timing.strip(" ()"), (10, vis.shape[0] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-        self.image_pub.publish(numpy_to_image(vis, color_msg.header))
+        self.image_pub.publish(numpy_to_image(vis, header))
         return vis
 
 
@@ -224,29 +280,29 @@ def main():
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     threading.Thread(target=_spin, args=(executor,), daemon=True).start()
+    worker = threading.Thread(target=node.segment_loop, daemon=True)
+    worker.start()
 
     shown = False
-    last_seq = 0
     try:
         while rclpy.ok():
-            seq, frames = node.latest()
-            if seq != last_seq and frames is not None:
-                last_seq = seq
-                vis = node.process(*frames)
-                if node.show and vis is not None:
+            item = node.take_segmented(timeout=0.01)
+            if item is not None:
+                vis = node.finish(item)
+                if node.show:
                     cv2.imshow(WINDOW, vis)
                     shown = True
             if node.show:
-                key = cv2.waitKey(10) & 0xFF
+                key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27):
                     break
                 if shown and cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                     break
-            else:
-                time.sleep(0.01)
     except KeyboardInterrupt:
         pass
     finally:
+        node._stop.set()
+        worker.join(timeout=3.0)
         cv2.destroyAllWindows()
         executor.shutdown()
         node.destroy_node()

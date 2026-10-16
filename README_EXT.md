@@ -52,7 +52,7 @@ ros2 launch realsense2_camera rs_launch.py \
 
 # 终端 2：节点
 ros2 run seg2grasp_ros suction_node
-ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false   # 或用 launch 只启动节点
+ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false show:=true  # 或用 launch 只启动节点
 ```
 
 | launch 参数 | 说明 |
@@ -62,6 +62,8 @@ ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false   # 或用 la
 | `vacuum_radius` | 吸盘半径（mm），默认 30；请设为实际吸盘半径（密封检查按此计算吸盘覆盖范围） |
 | `seal_min` | 密封检查阈值：吸盘圆盘内能密封的像素比例下限，默认 0.98；设为 0 关闭检查 |
 | `show` | 是否显示结果窗口，默认 `true` |
+| `fp16` | 分割模型用 float16 推理，默认 `true`（比 float32 快约 3 倍，结果几乎相同） |
+| `seg_min_size` | 分割输入图像短边像素，默认 `0`（即模型默认 800）；设为 600 / 480 更快，但分割更粗 |
 
 节点参数（`ros2 run ... --ros-args -p 参数:=值`）还包括 `color_topic`、`depth_topic`、`color_info_topic`、`depth_info_topic`，默认对应上面相机启动方式发布的 topic。
 
@@ -70,7 +72,8 @@ ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false   # 或用 la
 ## 处理方式
 
 - 节点始终处理**最新**的一帧：处理期间到达的帧会被丢弃，处理完立即取下一帧最新数据。
-- 每处理完一帧就刷新结果窗口，窗口始终显示最新结果（左下角显示单帧耗时，当前约 1.3 s/帧）。
+- 两段流水线：后台线程分割新一帧的同时，主线程规划上一帧的吸取点。默认设置下 `/seg2grasp/suction_pose` 约 2 Hz、单帧延迟约 0.6 s（RTX 5080 Laptop 实测）；`seg_min_size:=600` 约 2.5 Hz，`480` 约 2.8 Hz。
+- 每处理完一帧就刷新结果窗口，窗口始终显示最新结果（左下角显示输出频率和延迟）。
 - 深度图会用两个相机的内参和 TF 外参自动对齐到彩色图；若相机启用了 `align_depth.enable:=true`，将 `depth_topic` 设为 `/camera/camera/aligned_depth_to_color/image_raw` 即可跳过对齐。
 
 ## 输出
