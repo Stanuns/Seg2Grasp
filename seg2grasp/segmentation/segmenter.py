@@ -61,7 +61,7 @@ class Segmenter:
     """Mask2Former class-agnostic instance segmenter (RGB + inverted depth)."""
 
     def __init__(self, config_path=None, weights_path=None, score_threshold=0.5,
-                 device=None, fp16=False, min_size=None):
+                 device=None, fp16=False, min_size=None, depth_min=300.0):
         """
         Args:
             fp16 (bool): run the network under CUDA float16 autocast (~3x faster
@@ -69,6 +69,9 @@ class Segmenter:
             min_size (int, optional): shortest-edge input size; defaults to the
                 config's ``INPUT.MIN_SIZE_TEST`` (800). Smaller is faster but
                 coarser.
+            depth_min (float): nearest depth (mm) kept when normalizing the depth
+                input; anything nearer is clipped to it. Lower it for close-range
+                cameras.
         """
         import torch
         from detectron2.config import get_cfg
@@ -82,6 +85,7 @@ class Segmenter:
         config_path = config_path or paths.SEG_CONFIG
         weights_path = weights_path or paths.SEG_WEIGHTS
         self.score_threshold = score_threshold
+        self.depth_min = depth_min
 
         cfg = get_cfg()
         add_deeplab_config(cfg)
@@ -114,7 +118,7 @@ class Segmenter:
     def _prep_depth(self, depth):
         """Raw metric depth (mm) -> normalized, inpainted, inverted 3-channel image."""
         if depth.ndim == 2:
-            depth_img = _normalize_depth_for_seg(depth)
+            depth_img = _normalize_depth_for_seg(depth, min_val=self.depth_min)
         else:
             depth_img = depth  # already a normalized 3-channel depth image
         depth_img = inpaint_depth(depth_img)

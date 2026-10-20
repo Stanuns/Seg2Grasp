@@ -1,8 +1,8 @@
-# Seg2Grasp 扩展说明（RealSense D435i + ROS 2）
+# Seg2Grasp 扩展说明（RealSense D435i / Orbbec Gemini 305 + ROS 2）
 
-以 ROS 2 节点运行：订阅 RealSense D435i 的彩色图与深度图 topic，实时输出目标物的吸取点（只用分割 + 抓取，不使用 Qwen 分类）。
+以 ROS 2 节点运行：订阅相机（RealSense D435i 或 Orbbec Gemini 305）的彩色图与深度图 topic，实时输出目标物的吸取点（只用分割 + 抓取，不使用 Qwen 分类）。
 
-环境：Ubuntu 22.04、ROS 2 Humble、`realsense2_camera`（realsense-ros 4.x）。
+环境：Ubuntu 22.04、ROS 2 Humble、`realsense2_camera`（realsense-ros 4.x）、`orbbec_camera`（OrbbecSDK_ROS2，使用 Gemini 305 时需要）。
 
 ## 环境准备
 
@@ -27,21 +27,27 @@ colcon build --packages-select seg2grasp_ros
 cd ~/ksdy_ws/ws_seg2grasp
 source /opt/ros/humble/setup.bash
 source ~/ksdy_ws/embodied_ws/install/setup.bash   # realsense2_camera 所在工作区
+source ~/ksdy_ws/orbbec_ws/install/setup.bash     # orbbec_camera 所在工作区
 source install/setup.bash
 source src/Seg2Grasp/venvs/seg/bin/activate
 ```
 
 **方式一：一条命令同时启动相机和节点**
 
+用 `camera` 参数选择相机：`d435i`（默认）或 `gemini305`。
+
 ```bash
-ros2 launch seg2grasp_ros seg2grasp.launch.py
+ros2 launch seg2grasp_ros seg2grasp.launch.py                       # RealSense D435i
+ros2 launch seg2grasp_ros seg2grasp.launch.py camera:=gemini305     # Orbbec Gemini 305
 ros2 launch seg2grasp_ros seg2grasp.launch.py roi:=20,140,440,500 vacuum_radius:=20.0
 ```
+
+两台相机不要同时启动：两者默认都发布 `camera_link`、`camera_color_optical_frame` 等同名 TF 坐标系。
 
 **方式二：相机和节点分开启动**
 
 ```bash
-# 终端 1：相机
+# 终端 1：相机（D435i）
 ros2 launch realsense2_camera rs_launch.py \
   pointcloud.enable:=true \
   depth_module.depth_profile:=848x480x30 \
@@ -50,13 +56,22 @@ ros2 launch realsense2_camera rs_launch.py \
   temporal_filter.enable:=true \
   hole_filling_filter.enable:=true
 
-# 终端 2：节点
-ros2 run seg2grasp_ros suction_node
-ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false show:=true  # 或用 launch 只启动节点
+# 终端 1：相机（Gemini 305）
+ros2 launch orbbec_camera gemini_301_series.launch.py \
+  enable_colored_point_cloud:=true \
+  depth_registration:=true
+
+# 终端 2：节点（只启动节点，camera 与终端 1 的相机一致）
+ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false
+ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false camera:=gemini305
+ros2 run seg2grasp_ros suction_node   # 或直接运行节点（默认订阅 D435i 的 topic）
 ```
+
+Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开 `depth_registration`（这里也显式写出）：`/camera/depth/image_raw` 已对齐到彩色图（坐标系 `camera_color_optical_frame`，分辨率与彩色图相同），节点直接使用，不再做深度配准。
 
 | launch 参数 | 说明 |
 |---|---|
+| `camera` | 使用的相机：`d435i`（默认）或 `gemini305`；决定启动的相机驱动、订阅的 topic 和 `z_near` / `z_far` 默认值 |
 | `launch_camera` | 是否同时启动相机，默认 `true` |
 | `roi` | 彩色图裁剪区域 `y,x,h,w`，默认整幅图 |
 | `vacuum_radius` | 吸盘半径（mm），默认 30；请设为实际吸盘半径（密封检查按此计算吸盘覆盖范围） |
@@ -64,8 +79,17 @@ ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false show:=true  #
 | `show` | 是否显示结果窗口，默认 `true` |
 | `fp16` | 分割模型用 float16 推理，默认 `true`（比 float32 快约 3 倍，结果几乎相同） |
 | `seg_min_size` | 分割输入图像短边像素，默认 `0`（即模型默认 800）；设为 600 / 480 更快，但分割更粗 |
+| `z_near` / `z_far` | 抓取使用的物体深度范围（mm），范围外的点被忽略；留空则按相机取默认值：`d435i` 为 300 / 1050，`gemini305` 为 100 / 1050 |
 
-节点参数（`ros2 run ... --ros-args -p 参数:=值`）还包括 `color_topic`、`depth_topic`、`color_info_topic`、`depth_info_topic`，默认对应上面相机启动方式发布的 topic。
+节点参数（`ros2 run ... --ros-args -p 参数:=值`）还包括 `color_topic`、`depth_topic`、`color_info_topic`、`depth_info_topic`。launch 会按 `camera` 自动设置；直接 `ros2 run` 时默认是 D435i 的 topic，使用 Gemini 305 时需手动指定：
+
+| 节点参数 | D435i（默认） | Gemini 305 |
+|---|---|---|
+| `color_topic` | `/camera/camera/color/image_raw` | `/camera/color/image_raw` |
+| `depth_topic` | `/camera/camera/depth/image_rect_raw` | `/camera/depth/image_raw` |
+| `color_info_topic` | `/camera/camera/color/camera_info` | `/camera/color/camera_info` |
+| `depth_info_topic` | `/camera/camera/depth/camera_info` | `/camera/depth/camera_info` |
+| `z_near` | `300.0` | `100.0` |
 
 退出：在结果窗口按 `q` / Esc、关闭窗口，或在终端按 Ctrl+C。
 
@@ -74,7 +98,7 @@ ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false show:=true  #
 - 节点始终处理**最新**的一帧：处理期间到达的帧会被丢弃，处理完立即取下一帧最新数据。
 - 两段流水线：后台线程分割新一帧的同时，主线程规划上一帧的吸取点。默认设置下 `/seg2grasp/suction_pose` 约 2 Hz、单帧延迟约 0.6 s（RTX 5080 Laptop 实测）；`seg_min_size:=600` 约 2.5 Hz，`480` 约 2.8 Hz。
 - 每处理完一帧就刷新结果窗口，窗口始终显示最新结果（左下角显示输出频率和延迟）。
-- 深度图会用两个相机的内参和 TF 外参自动对齐到彩色图；若相机启用了 `align_depth.enable:=true`，将 `depth_topic` 设为 `/camera/camera/aligned_depth_to_color/image_raw` 即可跳过对齐。
+- 深度图会用两个相机的内参和 TF 外参自动对齐到彩色图；若深度已与彩色图对齐（坐标系和分辨率都相同），则跳过对齐。D435i 若启用了 `align_depth.enable:=true`，将 `depth_topic` 设为 `/camera/camera/aligned_depth_to_color/image_raw` 即可；Gemini 305 按上面的方式启动时深度已对齐。
 
 ## 输出
 
@@ -128,5 +152,5 @@ ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false show:=true  #
 
 ## 使用要求
 
-- 工件表面到相机的距离需在 300–1050 mm 之间。
+- 工件表面到相机的距离需在 `z_near`–`z_far` 之间（D435i 默认 300–1050 mm，Gemini 305 默认 100–1050 mm）。
 - 程序选择离相机最近（最高）的物体；画面边缘有杂物时，用 `roi` 只保留工件区域。

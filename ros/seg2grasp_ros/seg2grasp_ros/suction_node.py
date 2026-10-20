@@ -1,12 +1,12 @@
-"""Seg2Grasp ROS 2 node: live suction-point detection from RealSense topics.
+"""Seg2Grasp ROS 2 node: live suction-point detection from RealSense / Orbbec topics.
 
-Subscribes to the RealSense color image, depth image and both camera_infos,
+Subscribes to the camera color image, depth image and both camera_infos,
 registers the depth into the color camera (skipped when it already is, e.g. with
-``align_depth.enable:=true``), runs segmentation -> target selection -> suction
-planning, and publishes the result. Two-stage pipeline: a worker thread segments
-the newest frame (GPU, float16 by default) while the main thread plans the suction
-point on the previous one. Frames that arrive while busy are dropped, and the
-window always shows the latest result.
+RealSense ``align_depth.enable:=true`` or Orbbec ``depth_registration:=true``),
+runs segmentation -> target selection -> suction planning, and publishes the result.
+Two-stage pipeline: a worker thread segments the newest frame (GPU, float16 by
+default) while the main thread plans the suction point on the previous one. Frames
+that arrive while busy are dropped, and the window always shows the latest result.
 
 Publishes:
     ~/suction_pose  geometry_msgs/PoseStamped  suction point (m) in the color optical
@@ -97,6 +97,8 @@ class SuctionNode(Node):
         self.declare_parameter("sync_slop", 0.02)         # color/depth stamp tolerance (s)
         self.declare_parameter("fp16", True)              # float16 inference (~3x faster segmentation)
         self.declare_parameter("seg_min_size", 0)         # segmentation input short edge; 0 = model default (800)
+        self.declare_parameter("z_near", 300.0)           # depth band (mm) of object points used for grasping
+        self.declare_parameter("z_far", 1050.0)
 
         p = lambda name: self.get_parameter(name).value
         roi = p("roi").strip()
@@ -104,9 +106,10 @@ class SuctionNode(Node):
         self.show = bool(p("show"))
 
         self.get_logger().info("Loading segmentation model ...")
-        segmenter = Segmenter(fp16=bool(p("fp16")), min_size=int(p("seg_min_size")) or None)
+        z_near, z_far = float(p("z_near")), float(p("z_far"))
+        segmenter = Segmenter(fp16=bool(p("fp16")), min_size=int(p("seg_min_size")) or None, depth_min=z_near)
         self.pipe = Seg2GraspPipeline(segmenter, classifier=None, vacuum_radius=float(p("vacuum_radius")),
-                                      seal_min=float(p("seal_min")))
+                                      seal_min=float(p("seal_min")), z_near=z_near, z_far=z_far)
 
         self.k_color = self.k_depth = None
         self.depth_frame = None

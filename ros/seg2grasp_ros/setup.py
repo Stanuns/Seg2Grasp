@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer="sunwei-ksdy-robot",
     maintainer_email="sunweijm.sun@gmail.com",
-    description="ROS 2 node for Seg2Grasp: live suction-point detection from RealSense topics.",
+    description="ROS 2 node for Seg2Grasp: live suction-point detection from RealSense / Orbbec topics.",
     license="MIT",
     entry_points={
         "console_scripts": [
