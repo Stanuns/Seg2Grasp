@@ -4,7 +4,7 @@ Given the point cloud of a target object, find the optimal suction pose
 ``(point, normal)``: a locally flat, cup-sized patch whose surface normal faces
 the camera. Non-learning (no trained weights): geometrically-uniform candidate
 points are evaluated over the object surface and the best is chosen by a weighted
-score (paper Eq. 2) of flatness, proximity to the object centre of gravity, and
+score (paper Eq. 2) of flatness, proximity to the middle of the object, and
 graspable-point count. A RANSAC cup-disc search is kept as a fallback.
 
 Main entry point: :func:`estimate_suction_point`.
@@ -54,11 +54,12 @@ def _voxel_downsample(points, voxel):
 
 
 def suction_candidates(surface, vacuum_radius=30.0, spacing=None, min_points=8, flat_tol=3.0,
-                       margin=1.5):
+                       margin=1.5, extra_seeds=None):
     """Evaluate geometrically-uniform candidate suction points over a surface.
 
-    Seeds are placed uniformly (one per ``spacing``-sized voxel, default = the cup
-    radius so they tile the surface). Each seed gathers the points within
+    Seeds are placed uniformly (one per ``spacing``-sized voxel, default = 2/3 of
+    the cup radius, so the best spot on the object is never far from a seed), plus
+    any ``extra_seeds`` (e.g. the object centre). Each seed gathers the points within
     ``vacuum_radius`` and is a *valid* candidate if it has enough points and the
     patch is flat enough (mean abs. distance to its fitted plane ≤ ``flat_tol`` mm).
 
@@ -71,8 +72,10 @@ def suction_candidates(surface, vacuum_radius=30.0, spacing=None, min_points=8, 
     margin_dev, n, valid}`` where ``point`` is the patch centre of gravity (mean
     of its points) and ``normal`` is that patch's camera-facing unit normal.
     """
-    spacing = spacing or vacuum_radius
+    spacing = spacing or vacuum_radius * 2 / 3
     seeds = _voxel_downsample(surface, spacing)
+    if extra_seeds is not None and len(extra_seeds):
+        seeds = np.vstack([np.asarray(extra_seeds, seeds.dtype).reshape(-1, 3), seeds])
     n_seeds = len(seeds)
     if n_seeds == 0:
         return []
@@ -112,9 +115,11 @@ def suction_candidates(surface, vacuum_radius=30.0, spacing=None, min_points=8, 
 
     flat = per_seed(res) / np.maximum(n, 1)
     # 90th percentile of the residuals within the margin, per seed (np.percentile's
-    # linear interpolation on each seed's sorted residuals)
-    order = np.lexsort((res, gid))
-    res_sorted = res[order]
+    # linear interpolation on each seed's sorted residuals). gid is already sorted,
+    # so offsetting each seed's residuals by gid * span sorts them per seed in one
+    # plain sort (several times faster than lexsort).
+    span = res.max() + 1.0 if len(res) else 1.0
+    res_sorted = np.sort(gid * span + res) - gid * span
     counts = np.bincount(gid, minlength=n_seeds)
     starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
     pos = 0.9 * np.maximum(counts - 1, 0)
@@ -191,30 +196,82 @@ def seal_ratio(pc_img, member, model, point, normal, vacuum_radius=30.0, tol=5.0
     return float(good.sum() / in_disc.sum())             # disc pixels outside the crop count as unsealed
 
 
-def score_candidates(candidates, centroid, w_angle=0.4, w_dist=0.15, w_count=0.15,
-                     w_flat=0.3, flat_tol=3.0):
+def _object_centre(pc_img, region, member, model, surface):
+    """Centre of the object, for the centrality score and an extra seed.
+
+    In the image when the pixel model is known: the centroid of the object's mask
+    pixels — including pixels without depth, so missing depth on shiny or
+    perforated parts does not drag it — with the object's equivalent radius
+    ``sqrt(area / pi)`` (px) as the scale. Otherwise in 3-D: the surface centroid
+    and the radius of a disc with the surface's spread.
+
+    Returns ``(centre, scale, seed)``: ``centre`` is ``(u, v)`` px in the image or
+    a 3-D point (mm), and ``seed`` is the 3-D surface point nearest the centre.
+    """
+    if model is not None:
+        vs, us = np.nonzero(region)
+        centre = np.array([us.mean(), vs.mean()])
+        scale = max(np.sqrt(len(us) / np.pi), 1.0)
+        mv, mu = np.nonzero(member)
+        k = np.argmin((mu - centre[0]) ** 2 + (mv - centre[1]) ** 2)
+        return centre, scale, pc_img[mv[k], mu[k]]
+    centre = surface.mean(axis=0)
+    # disc of radius R: mean squared distance from its centre is R^2 / 2
+    scale = max(np.sqrt(2 * np.mean(np.sum((surface - centre) ** 2, axis=1))), 1.0)
+    return centre, scale, surface[np.argmin(np.linalg.norm(surface - centre, axis=1))]
+
+
+def centre_distance(points, centre, scale, model=None):
+    """Distance of ``points`` (N x 3, mm) from the object centre, in units of the
+    object's equivalent radius (0 = centre, about 1 = edge); measured in the image
+    if ``model`` is given (see :func:`_object_centre`)."""
+    points = np.asarray(points, np.float64).reshape(-1, 3)
+    if model is not None:
+        fx, cx, fy, cy = model
+        z = np.maximum(points[:, 2], 1e-6)
+        uv = np.stack([fx * points[:, 0] / z + cx, fy * points[:, 1] / z + cy], -1)
+        return np.linalg.norm(uv - centre, axis=1) / scale
+    return np.linalg.norm(points - centre, axis=1) / scale
+
+
+def score_candidates(candidates, centroid=None, w_angle=0.25, w_dist=0.3, w_count=0.05,
+                     w_flat=0.4, flat_tol=3.0):
     """Score valid suction candidates (paper Eq. 2, plus a flatness term): weighted
     sum of the surface angle (how top-facing the patch normal is), proximity to
-    the object centre of gravity, graspable-point count, and flatness of the
-    patch's surroundings. Weights sum to 1. Fills ``candidate['score']`` and
-    returns the valid list.
+    the middle of the object, graspable-point count, and flatness of the patch's
+    surroundings. Weights sum to 1. Fills ``candidate['score']`` and returns the
+    valid list.
+
+    The centrality term is ``1 - centre_dist`` (clipped to [0, 1]), where
+    ``candidate['centre_dist']`` is the distance from the object centre in units of
+    the object's equivalent radius (see :func:`centre_distance`); without it, the
+    3-D distance to ``centroid`` relative to the farthest candidate is used. It is
+    an absolute measure, so a candidate halfway to the edge loses half the term
+    whatever the other candidates are: on a flat face, where the other terms tie,
+    the cup goes to the middle; a bend, rib or crease there still outweighs it.
 
     The angle term is ``|normal_z|`` — the alignment of the patch normal with the
     camera/approach axis — so a top-facing patch (normal pointing straight up at
     the camera) scores highest and a steep side patch on a round object scores
-    low. The flatness term is ``1 - margin_dev / flat_tol`` (clipped to [0, 1]):
-    it steers the cup away from bends, ribs and creases, which otherwise tie with
-    flat faces on the other three terms.
+    low. The flatness term is ``1 - (margin_dev - floor) / flat_tol`` (clipped to
+    [0, 1]), where ``floor`` (10th percentile of ``margin_dev`` over the candidates)
+    is the object's own sensor-noise level: it steers the cup away from bends,
+    ribs and creases, but sensor noise alone does not move it off the middle of a
+    flat face.
     """
     valid = [c for c in candidates if c["valid"]]
     if not valid:
         return []
-    dists = np.array([np.linalg.norm(c["point"] - centroid) for c in valid])
     counts = np.array([c["n"] for c in valid], dtype=float)
     s_angle = np.array([abs(c["normal"][2]) for c in valid])   # 1 = top-facing, 0 = vertical wall
-    s_dist = 1 - dists / (dists.max() + 1e-9)                   # closer to CoG -> more stable
+    if all("centre_dist" in c for c in valid):
+        s_dist = np.clip(1 - np.array([c["centre_dist"] for c in valid]), 0, 1)  # 1 = middle
+    else:
+        dists = np.array([np.linalg.norm(c["point"] - centroid) for c in valid])
+        s_dist = 1 - dists / (dists.max() + 1e-9)               # closer to CoG -> more stable
     s_count = counts / (counts.max() + 1e-9)                    # more support -> better
-    s_flat = np.clip(1 - np.array([c["margin_dev"] for c in valid]) / flat_tol, 0, 1)  # 1 = flat surroundings
+    margin_dev = np.array([c["margin_dev"] for c in valid])
+    s_flat = np.clip(1 - (margin_dev - np.percentile(margin_dev, 10)) / flat_tol, 0, 1)  # 1 = flat surroundings
     scores = w_angle * s_angle + w_dist * s_dist + w_count * s_count + w_flat * s_flat
     for c, sc in zip(valid, scores):
         c["score"] = float(sc)
@@ -270,17 +327,17 @@ def _to_camera_facing(plane):
 
 def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
                            z_near=300.0, z_far=1050.0, vacuum_radius=30.0,
-                           threshold=3.0, w_angle=0.4, w_dist=0.15, w_count=0.15, w_flat=0.3,
+                           threshold=3.0, w_angle=0.25, w_dist=0.3, w_count=0.05, w_flat=0.4,
                            seal_min=0.98, seal_tol=5.0,
                            rng=None, visualize=False, rgb_img=None, debug=None):
     """Estimate the optimal suction pose for a single target object.
 
     Evaluates geometrically-uniform candidate suction points over the object
     surface and picks the best by a weighted score (paper Eq. 2): surface angle
-    (how top-facing the patch normal is) + proximity to the object's centre of
-    gravity + graspable-point count. Local flatness and a seal check (the whole
-    cup disc must lie on the object, with valid depth, on the patch plane) gate
-    candidate validity.
+    (how top-facing the patch normal is) + proximity to the middle of the object
+    + graspable-point count + flatness of the surroundings. Local flatness and a
+    seal check (the whole cup disc must lie on the object, with valid depth, on
+    the patch plane) gate candidate validity.
 
     Args:
         pc_img (np.ndarray): organized point cloud [H, W, 3] (mm) of the target
@@ -292,15 +349,16 @@ def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
         vacuum_radius (float): suction cup radius (mm) for the disc search.
         threshold (float): plane inlier / flatness tolerance (mm).
         w_angle, w_dist, w_count, w_flat (float): score weights (sum to 1) for
-            surface angle, centroid proximity, support count, and flatness of the
-            patch's surroundings (see :func:`score_candidates`).
+            surface angle, proximity to the object centre, support count, and
+            flatness of the patch's surroundings (see :func:`score_candidates`).
         seal_min (float): minimum fraction of the cup disc that must seal (see
             :func:`seal_ratio`); 0 disables the seal check.
         seal_tol (float): max distance (mm) of a sealing pixel from the cup plane.
         rng (np.random.Generator, optional): only used by the RANSAC fallback.
         visualize (bool): draw the Open3D grasp visualization.
         rgb_img (np.ndarray, optional): color crop, only for visualization.
-        debug (dict, optional): if given, filled with ``surface``, ``centroid``,
+        debug (dict, optional): if given, filled with ``surface``, ``centroid`` (the
+            surface point at the middle of the object),
             ``candidates`` (each scored), ``point``, ``normal`` for
             :func:`visualize_suction_steps`.
 
@@ -322,18 +380,29 @@ def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
     step = max(int(downsample_rate), 1)
     surface = surface[::step]
 
-    # Evaluate geometrically-uniform candidates and pick the best by the weighted
-    # score (paper Eq. 2): flatness + proximity to the object centre of gravity +
-    # graspable-point count.
+    # Evaluate geometrically-uniform candidates (plus one at the object centre) and
+    # pick the best by the weighted score (paper Eq. 2): surface angle + proximity
+    # to the middle of the object + graspable-point count + flatness.
     centroid = surface.mean(axis=0)
-    candidates = suction_candidates(surface, vacuum_radius=vacuum_radius, flat_tol=threshold)
+    model = _pixel_model(pc_img)
+    region = mask.astype(bool) if mask is not None else in_band
+    centre, scale, centre_seed = _object_centre(pc_img, region, member, model, surface)
+    candidates = suction_candidates(surface, vacuum_radius=vacuum_radius, flat_tol=threshold,
+                                    extra_seeds=centre_seed[None])
+    if debug is not None:
+        centroid = centre_seed          # plotted: the centre the score pulls toward
+    if candidates:
+        dists = centre_distance([c["point"] for c in candidates], centre, scale, model)
+        for c, d in zip(candidates, dists):
+            c["centre_dist"] = float(d)
 
     scored = score_candidates(candidates, centroid, w_angle, w_dist, w_count, w_flat, flat_tol=threshold)
 
     # Seal check, best score first: the first flat candidate whose cup disc seals
     # (no holes, edges or steps under it) wins, so usually only a few are checked.
     # Unchecked candidates keep seal=None.
-    model = _pixel_model(pc_img) if seal_min > 0 else None
+    if seal_min <= 0:
+        model = None
     for c in candidates:
         c["seal"] = None
     best = None
@@ -389,8 +458,8 @@ def visualize_suction_steps(debug, save_path=None, show=False, title=None, elev=
     Near top-down 3-D scatter of: the object surface (grey), the largest flat
     plane the chosen point lies on (blue), the cup-sized suction disc at the
     chosen point (orange), the geometrically-uniform candidates colored by their
-    weighted score (viridis; grey ✗ = too curved to seal), the object centre of
-    gravity (black +), and the chosen contact point (red star, max score) with its
+    weighted score (viridis; grey ✗ = too curved to seal), the object centre
+    (black +), and the chosen contact point (red star, max score) with its
     camera-facing normal. Reads the ``debug`` dict populated by
     :func:`estimate_suction_point` (call it with ``debug={}``).
 
@@ -434,7 +503,7 @@ def visualize_suction_steps(debug, save_path=None, show=False, title=None, elev=
         fig.colorbar(sc, ax=ax, shrink=0.55, pad=0.12, label="suction score")
     if centroid is not None:
         ax.scatter([centroid[0]], [centroid[1]], [centroid[2]], s=90, c="black", marker="+",
-                   label="object CoG")
+                   label="object centre")
     ax.scatter([point[0]], [point[1]], [point[2]], s=220, c="red", marker="*",
                label="chosen point (max score)", depthshade=False)
     ax.quiver(point[0], point[1], point[2], normal[0] * 40, normal[1] * 40, normal[2] * 40,
