@@ -86,9 +86,13 @@ class Seg2GraspPipeline:
             return None
 
         # Most elevated object first; if the cup cannot seal anywhere on it (e.g. a
-        # small or curved object), fall back to the next most elevated one.
+        # small or curved object), fall back to the next most elevated one. Objects
+        # outside the depth band are skipped (e.g. the robot's own gripper in view of
+        # a wrist camera): their masks can bleed onto the background behind them.
         target = suction = None
         for candidate in rank_targets(masks, bboxes, pc, rgb_img=rgb):
+            if not self.z_near < candidate.centroid[2] < self.z_far:
+                continue
             suction = estimate_suction_point(
                 candidate.pc_crop, mask=candidate.mask_crop, z_near=self.z_near, z_far=self.z_far,
                 vacuum_radius=self.vacuum_radius, seal_min=self.seal_min, rng=rng, visualize=visualize,

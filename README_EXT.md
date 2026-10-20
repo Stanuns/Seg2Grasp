@@ -71,10 +71,10 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 
 | launch 参数 | 说明 |
 |---|---|
-| `camera` | 使用的相机：`d435i`（默认）或 `gemini305`；决定启动的相机驱动、订阅的 topic 和 `z_near` / `z_far` 默认值 |
+| `camera` | 使用的相机：`d435i`（默认）或 `gemini305`；决定启动的相机驱动、订阅的 topic 和 `z_near` / `z_far` / `vacuum_radius` 默认值 |
 | `launch_camera` | 是否同时启动相机，默认 `true` |
 | `roi` | 彩色图裁剪区域 `y,x,h,w`，默认整幅图 |
-| `vacuum_radius` | 吸盘半径（mm），默认 30；请设为实际吸盘半径（密封检查按此计算吸盘覆盖范围） |
+| `vacuum_radius` | 吸盘半径（mm）；留空则按相机取默认值：`d435i` 为 30，`gemini305` 为 15（腕部相机视野中吸盘直径约 30 mm）。请设为实际吸盘半径：设大了会找不到足够大的平整区域（大量 `no graspable object`），平整度评估的范围也会跨过弯折 |
 | `seal_min` | 密封检查阈值：吸盘圆盘内能密封的像素比例下限，默认 0.98；设为 0 关闭检查 |
 | `show` | 是否显示结果窗口，默认 `true` |
 | `fp16` | 分割模型用 float16 推理，默认 `true`（比 float32 快约 3 倍，结果几乎相同） |
@@ -155,3 +155,4 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 
 - 工件表面到相机的距离需在 `z_near`–`z_far` 之间（D435i 默认 300–2000 mm，Gemini 305 默认 70–500 mm）。
 - 程序选择离相机最近（最高）的物体；画面边缘有杂物时，用 `roi` 只保留工件区域。
+- 中心深度不在 `z_near`–`z_far` 内的物体不作为目标，例如腕部相机视野中的夹爪本体。机器人自身的吸盘若在该范围内，因其表面弯曲通常不会被选中；如需彻底排除，可调大 `z_near` 或用 `roi` 裁掉。
