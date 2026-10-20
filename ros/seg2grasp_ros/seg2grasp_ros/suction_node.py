@@ -99,6 +99,8 @@ class SuctionNode(Node):
         self.declare_parameter("seg_min_size", 0)         # segmentation input short edge; 0 = model default (800)
         self.declare_parameter("z_near", 300.0)           # depth band (mm) of object points used for grasping
         self.declare_parameter("z_far", 2000.0)
+        self.declare_parameter("hole_detection", True)    # find holes in the color image, keep the cup off them
+        self.declare_parameter("hole_margin", 2.0)        # solid material (mm) required between cup and hole
 
         p = lambda name: self.get_parameter(name).value
         roi = p("roi").strip()
@@ -109,7 +111,9 @@ class SuctionNode(Node):
         z_near, z_far = float(p("z_near")), float(p("z_far"))
         segmenter = Segmenter(fp16=bool(p("fp16")), min_size=int(p("seg_min_size")) or None, depth_min=z_near)
         self.pipe = Seg2GraspPipeline(segmenter, classifier=None, vacuum_radius=float(p("vacuum_radius")),
-                                      seal_min=float(p("seal_min")), z_near=z_near, z_far=z_far)
+                                      seal_min=float(p("seal_min")), z_near=z_near, z_far=z_far,
+                                      hole_detection=bool(p("hole_detection")),
+                                      hole_margin=float(p("hole_margin")))
 
         self.k_color = self.k_depth = None
         self.depth_frame = None

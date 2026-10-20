@@ -54,14 +54,18 @@ def annotate_result(image, result, pc):
     """Standard Seg2Grasp overlay for a pipeline result.
 
     Colored mask outlines + light fill for every instance, a white outline and
-    label on the chosen target, and the suction contact point (projected from the
-    3-D suction point to the nearest pixel of ``pc``). Shared by the offline demo
-    and the live loop so both look the same.
+    label on the chosen target, red outlines on its detected holes, and the
+    suction contact point (projected from the 3-D suction point to the nearest
+    pixel of ``pc``). Shared by the offline demo and the live loop so both look
+    the same.
     """
     vis = overlay_masks(image, result.masks)                        # masks only, no boxes
     tmask = np.asarray(result.masks[result.target.index], np.uint8)
     cnts = cv2.findContours(tmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
     cv2.drawContours(vis, cnts, -1, (255, 255, 255), 2)             # white outline = target
+    if getattr(result, "holes", None) is not None:                  # red outline = detected holes
+        cnts = cv2.findContours(result.holes.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+        cv2.drawContours(vis, cnts, -1, (0, 0, 255), 2)
     d = np.abs(pc - result.suction.point).sum(axis=2)
     v, u = np.unravel_index(np.argmin(d), d.shape)
     vis = draw_suction_point(vis, (u, v))

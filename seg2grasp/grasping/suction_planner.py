@@ -152,7 +152,8 @@ def _pixel_model(pc_img, max_samples=5000):
     return fx, cx, fy, cy
 
 
-def seal_ratio(pc_img, member, model, point, normal, vacuum_radius=30.0, tol=5.0):
+def seal_ratio(pc_img, member, model, point, normal, vacuum_radius=30.0, tol=5.0,
+               holes=None, hole_margin=2.0):
     """Fraction of the suction-cup disc that can seal.
 
     The cup is a disc of ``vacuum_radius`` centred on ``point`` in the plane with
@@ -160,13 +161,17 @@ def seal_ratio(pc_img, member, model, point, normal, vacuum_radius=30.0, tol=5.0
     only if it is on the object (``member``), has valid depth, and its measured
     point lies within ``tol`` mm of the plane. Holes (no depth, or depth seen
     through the part), edges (off the object) and steps or creases (off the
-    plane) all lower the ratio.
+    plane) all lower the ratio. A hole known from ``holes`` (e.g. from the color
+    image, see :mod:`.hole_detection`) within ``vacuum_radius + hole_margin``
+    makes the cup leak however small the overlap, so the ratio is then 0.
 
     Args:
         pc_img (np.ndarray): organized point cloud [H, W, 3] (mm).
         member (np.ndarray): [H, W] bool, pixels belonging to the object.
         model (tuple): ``(fx, cx, fy, cy)`` from :func:`_pixel_model`.
         point, normal (np.ndarray): cup centre (mm) and unit plane normal.
+        holes (np.ndarray, optional): [H, W] bool, known hole pixels.
+        hole_margin (float): solid material (mm) required between the cup and a hole.
 
     Returns:
         float in [0, 1].
@@ -176,9 +181,10 @@ def seal_ratio(pc_img, member, model, point, normal, vacuum_radius=30.0, tol=5.0
     point, normal = np.asarray(point, np.float64), np.asarray(normal, np.float64)
     z = point[2]
     u0, v0 = fx * point[0] / z + cx, fy * point[1] / z + cy
+    reach = vacuum_radius + (hole_margin if holes is not None else 0.0)
     # a tilted disc projects inside this window (its nearest part is at depth >= z - r)
-    zmin = max(z - vacuum_radius, 1.0)
-    ru, rv = vacuum_radius * abs(fx) / zmin + 1, vacuum_radius * abs(fy) / zmin + 1
+    zmin = max(z - reach, 1.0)
+    ru, rv = reach * abs(fx) / zmin + 1, reach * abs(fy) / zmin + 1
     uu, vv = np.meshgrid(np.arange(np.floor(u0 - ru), np.ceil(u0 + ru) + 1, dtype=np.int64),
                          np.arange(np.floor(v0 - rv), np.ceil(v0 + rv) + 1, dtype=np.int64))
     rays = np.stack([(uu - cx) / fx, (vv - cy) / fy, np.ones(uu.shape)], axis=-1)
@@ -186,10 +192,16 @@ def seal_ratio(pc_img, member, model, point, normal, vacuum_radius=30.0, tol=5.0
     with np.errstate(divide="ignore", invalid="ignore"):
         t = (point @ normal) / denom                      # ray-plane intersection
     hit = rays * t[..., None]
-    in_disc = (np.abs(denom) > 1e-9) & (t > 0) & (np.linalg.norm(hit - point, axis=-1) <= vacuum_radius)
+    radial = np.where((np.abs(denom) > 1e-9) & (t > 0), np.linalg.norm(hit - point, axis=-1), np.inf)
+    in_disc = radial <= vacuum_radius
     if not in_disc.any():
         return 0.0
-    inside = in_disc & (uu >= 0) & (uu < w) & (vv >= 0) & (vv < h)
+    in_image = (uu >= 0) & (uu < w) & (vv >= 0) & (vv < h)
+    if holes is not None:
+        near = (radial <= reach) & in_image
+        if holes[vv[near], uu[near]].any():
+            return 0.0
+    inside = in_disc & in_image
     ui, vi = uu[inside], vv[inside]
     pts = pc_img[vi, ui]
     good = member[vi, ui] & (pts[:, 2] > 0) & (np.abs((pts - point) @ normal) <= tol)
@@ -328,7 +340,7 @@ def _to_camera_facing(plane):
 def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
                            z_near=300.0, z_far=1050.0, vacuum_radius=30.0,
                            threshold=3.0, w_angle=0.25, w_dist=0.3, w_count=0.05, w_flat=0.4,
-                           seal_min=0.98, seal_tol=5.0,
+                           seal_min=0.98, seal_tol=5.0, holes=None, hole_margin=2.0,
                            rng=None, visualize=False, rgb_img=None, debug=None):
     """Estimate the optimal suction pose for a single target object.
 
@@ -354,6 +366,11 @@ def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
         seal_min (float): minimum fraction of the cup disc that must seal (see
             :func:`seal_ratio`); 0 disables the seal check.
         seal_tol (float): max distance (mm) of a sealing pixel from the cup plane.
+        holes (np.ndarray, optional): [H, W] bool, known hole pixels (e.g. from the
+            color image). They are left out of the surface (their depth is filled
+            in, not measured), and the seal check rejects a cup within
+            ``hole_margin`` mm of one. Only used with the seal check on.
+        hole_margin (float): solid material (mm) required between the cup and a hole.
         rng (np.random.Generator, optional): only used by the RANSAC fallback.
         visualize (bool): draw the Open3D grasp visualization.
         rgb_img (np.ndarray, optional): color crop, only for visualization.
@@ -369,6 +386,8 @@ def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
     """
     in_band = (pc_img[:, :, 2] > z_near) & (pc_img[:, :, 2] < z_far)
     member = in_band & mask.astype(bool) if mask is not None else in_band
+    if holes is not None:
+        member = member & ~holes
     if mask is not None:
         surface = pc_img[member].reshape(-1, 3)
     else:
@@ -409,7 +428,8 @@ def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
     if model is not None:
         for c in sorted(scored, key=lambda c: -c["score"]):
             c["seal"] = seal_ratio(pc_img, member, model, c["point"], c["normal"],
-                                   vacuum_radius=vacuum_radius, tol=seal_tol)
+                                   vacuum_radius=vacuum_radius, tol=seal_tol,
+                                   holes=holes, hole_margin=hole_margin)
             c["valid"] = c["seal"] >= seal_min
             if c["valid"]:
                 best = c

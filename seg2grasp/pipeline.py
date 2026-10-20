@@ -18,7 +18,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .grasping.suction_planner import estimate_suction_point, SuctionPose
+from .grasping.hole_detection import detect_holes
+from .grasping.suction_planner import _pixel_model, estimate_suction_point, SuctionPose
 from .grasping.target_selection import rank_targets, TargetObject
 
 
@@ -32,6 +33,7 @@ class Seg2GraspResult:
     masks: np.ndarray = None        # all segmentation masks [N, H, W]
     bboxes: np.ndarray = None       # all boxes [N, 4]
     seg_vis: np.ndarray = None      # segmentation visualization image (optional)
+    holes: np.ndarray = None        # target's holes found in the color image [H, W] (optional)
 
 
 class Seg2GraspPipeline:
@@ -46,16 +48,21 @@ class Seg2GraspPipeline:
             (0 disables the planner's seal check).
         z_near, z_far (float): depth band (mm) of object points the grasp
             planner uses; points outside it are ignored.
+        hole_detection (bool): find through-holes in the color image (see
+            :mod:`.grasping.hole_detection`) so the cup is not placed over one.
+        hole_margin (float): solid material (mm) required between the cup and a hole.
     """
 
     def __init__(self, segmenter, classifier=None, vacuum_radius=30.0, seal_min=0.98,
-                 z_near=300.0, z_far=1050.0):
+                 z_near=300.0, z_far=1050.0, hole_detection=True, hole_margin=2.0):
         self.segmenter = segmenter
         self.classifier = classifier
         self.vacuum_radius = vacuum_radius
         self.seal_min = seal_min
         self.z_near = z_near
         self.z_far = z_far
+        self.hole_detection = hole_detection
+        self.hole_margin = hole_margin
 
     def run(self, rgb, depth, pc, classify=True, visualize=False, rng=None):
         """Run the full pipeline on one frame.
@@ -89,14 +96,27 @@ class Seg2GraspPipeline:
         # small or curved object), fall back to the next most elevated one. Objects
         # outside the depth band are skipped (e.g. the robot's own gripper in view of
         # a wrist camera): their masks can bleed onto the background behind them.
-        target = suction = None
+        # Holes are seen in the color image against the background, i.e. the pixels
+        # outside every object's mask.
+        model = None
+        if self.hole_detection and self.seal_min > 0 and rgb is not None:
+            model = _pixel_model(pc)
+            background = ~np.any(np.asarray(masks, bool), axis=0)
+
+        target = suction = holes = None
         for candidate in rank_targets(masks, bboxes, pc, rgb_img=rgb):
             if not self.z_near < candidate.centroid[2] < self.z_far:
                 continue
+            holes = holes_crop = None
+            if model is not None:
+                holes = detect_holes(rgb, masks[candidate.index], background,
+                                     px_per_mm=model[0] / candidate.centroid[2])
+                x0, y0, x1, y1 = candidate.bbox
+                holes_crop = holes[y0:y1, x0:x1]
             suction = estimate_suction_point(
                 candidate.pc_crop, mask=candidate.mask_crop, z_near=self.z_near, z_far=self.z_far,
-                vacuum_radius=self.vacuum_radius, seal_min=self.seal_min, rng=rng, visualize=visualize,
-                rgb_img=candidate.rgb_crop)
+                vacuum_radius=self.vacuum_radius, seal_min=self.seal_min, holes=holes_crop,
+                hole_margin=self.hole_margin, rng=rng, visualize=visualize, rgb_img=candidate.rgb_crop)
             if suction is not None:
                 target = candidate
                 break
@@ -110,4 +130,4 @@ class Seg2GraspPipeline:
 
         return Seg2GraspResult(
             target=target, suction=suction, label=label, confidence=confidence,
-            masks=masks, bboxes=bboxes, seg_vis=seg_vis)
+            masks=masks, bboxes=bboxes, seg_vis=seg_vis, holes=holes)

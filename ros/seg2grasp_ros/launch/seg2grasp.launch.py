@@ -88,6 +88,8 @@ def launch_setup(context):
             "seg_min_size": LaunchConfiguration("seg_min_size"),
             "z_near": float(z_near),
             "z_far": float(z_far),
+            "hole_detection": LaunchConfiguration("hole_detection"),
+            "hole_margin": LaunchConfiguration("hole_margin"),
         }],
     )
     return [camera, node]
@@ -113,5 +115,9 @@ def generate_launch_description():
         DeclareLaunchArgument("z_far", default_value="",
                               description="farthest object depth (mm) used for grasping; empty = camera default "
                                           "(d435i 2000, gemini305 500)"),
+        DeclareLaunchArgument("hole_detection", default_value="true",
+                              description="find holes in the color image and keep the suction cup off them"),
+        DeclareLaunchArgument("hole_margin", default_value="2.0",
+                              description="solid material (mm) required between the suction cup and a hole"),
         OpaqueFunction(function=launch_setup),
     ])
