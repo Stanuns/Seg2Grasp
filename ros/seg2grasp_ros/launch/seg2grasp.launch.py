@@ -35,7 +35,7 @@ CAMERAS = {
             "depth_info_topic": "/camera/camera/depth/camera_info",
         },
         "z_near": "300.0",
-        "z_far": "1050.0",
+        "z_far": "2000.0",
     },
     # enable_colored_point_cloud makes the driver align depth to color itself (depth_registration),
     # so depth/image_raw is already on the color grid and the node skips its own registration.
@@ -52,8 +52,8 @@ CAMERAS = {
             "color_info_topic": "/camera/color/camera_info",
             "depth_info_topic": "/camera/depth/camera_info",
         },
-        "z_near": "100.0",      # short-range camera, typically mounted ~0.3 m above the parts
-        "z_far": "1050.0",
+        "z_near": "70.0",       # short-range camera
+        "z_far": "500.0",
     },
 }
 
@@ -104,8 +104,9 @@ def generate_launch_description():
                               description="segmentation input short edge in px; 0 = model default 800 (smaller = faster, coarser)"),
         DeclareLaunchArgument("z_near", default_value="",
                               description="nearest object depth (mm) used for grasping; empty = camera default "
-                                          "(d435i 300, gemini305 100)"),
+                                          "(d435i 300, gemini305 70)"),
         DeclareLaunchArgument("z_far", default_value="",
-                              description="farthest object depth (mm) used for grasping; empty = camera default (1050)"),
+                              description="farthest object depth (mm) used for grasping; empty = camera default "
+                                          "(d435i 2000, gemini305 500)"),
         OpaqueFunction(function=launch_setup),
     ])

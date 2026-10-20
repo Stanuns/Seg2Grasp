@@ -79,7 +79,7 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 | `show` | 是否显示结果窗口，默认 `true` |
 | `fp16` | 分割模型用 float16 推理，默认 `true`（比 float32 快约 3 倍，结果几乎相同） |
 | `seg_min_size` | 分割输入图像短边像素，默认 `0`（即模型默认 800）；设为 600 / 480 更快，但分割更粗 |
-| `z_near` / `z_far` | 抓取使用的物体深度范围（mm），范围外的点被忽略；留空则按相机取默认值：`d435i` 为 300 / 1050，`gemini305` 为 100 / 1050 |
+| `z_near` / `z_far` | 抓取使用的物体深度范围（mm），范围外的点被忽略；留空则按相机取默认值：`d435i` 为 300 / 2000，`gemini305` 为 70 / 500 |
 
 节点参数（`ros2 run ... --ros-args -p 参数:=值`）还包括 `color_topic`、`depth_topic`、`color_info_topic`、`depth_info_topic`。launch 会按 `camera` 自动设置；直接 `ros2 run` 时默认是 D435i 的 topic，使用 Gemini 305 时需手动指定：
 
@@ -89,7 +89,8 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 | `depth_topic` | `/camera/camera/depth/image_rect_raw` | `/camera/depth/image_raw` |
 | `color_info_topic` | `/camera/camera/color/camera_info` | `/camera/color/camera_info` |
 | `depth_info_topic` | `/camera/camera/depth/camera_info` | `/camera/depth/camera_info` |
-| `z_near` | `300.0` | `100.0` |
+| `z_near` | `300.0` | `70.0` |
+| `z_far` | `2000.0` | `500.0` |
 
 退出：在结果窗口按 `q` / Esc、关闭窗口，或在终端按 Ctrl+C。
 
@@ -152,5 +153,5 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 
 ## 使用要求
 
-- 工件表面到相机的距离需在 `z_near`–`z_far` 之间（D435i 默认 300–1050 mm，Gemini 305 默认 100–1050 mm）。
+- 工件表面到相机的距离需在 `z_near`–`z_far` 之间（D435i 默认 300–2000 mm，Gemini 305 默认 70–500 mm）。
 - 程序选择离相机最近（最高）的物体；画面边缘有杂物时，用 `roi` 只保留工件区域。

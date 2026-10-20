@@ -98,7 +98,7 @@ class SuctionNode(Node):
         self.declare_parameter("fp16", True)              # float16 inference (~3x faster segmentation)
         self.declare_parameter("seg_min_size", 0)         # segmentation input short edge; 0 = model default (800)
         self.declare_parameter("z_near", 300.0)           # depth band (mm) of object points used for grasping
-        self.declare_parameter("z_far", 1050.0)
+        self.declare_parameter("z_far", 2000.0)
 
         p = lambda name: self.get_parameter(name).value
         roi = p("roi").strip()
