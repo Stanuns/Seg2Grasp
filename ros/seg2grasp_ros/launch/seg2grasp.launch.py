@@ -1,12 +1,18 @@
-"""Start the camera (optional) and the Seg2Grasp suction node.
+"""Start the camera(s) (optional) and one Seg2Grasp suction node per camera.
 
     ros2 launch seg2grasp_ros seg2grasp.launch.py                      # RealSense D435i (default)
     ros2 launch seg2grasp_ros seg2grasp.launch.py camera:=gemini305    # Orbbec Gemini 305
+    ros2 launch seg2grasp_ros seg2grasp.launch.py camera:=both         # both cameras at once
     ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false   # camera already running
     ros2 launch seg2grasp_ros seg2grasp.launch.py roi:=20,140,440,500 vacuum_radius:=20.0
+
+Each camera always runs under its own name, so both can run at the same time:
+its driver publishes /<camera>/... with TF frames <camera>_link,
+<camera>_color_optical_frame, ..., and its node /seg2grasp/<camera> publishes
+/seg2grasp/<camera>/suction_pose and /seg2grasp/<camera>/result_image.
 """
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -14,14 +20,16 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
-# Per camera: driver launch file, its arguments, the topics the node subscribes to, the
-# default depth band (mm) of object points used for grasping, and the default radius (mm)
-# of the suction cup used with that camera.
+# Per camera (the key is also its name): driver launch file, its arguments, the topics the
+# node subscribes to, the default depth band (mm) of object points used for grasping, and
+# the default radius (mm) of the suction cup used with that camera.
 CAMERAS = {
     "d435i": {
         "package": "realsense2_camera",
         "launch_file": "rs_launch.py",
         "launch_arguments": {
+            "camera_namespace": "/",    # topics /d435i/..., frames d435i_*
+            "camera_name": "d435i",
             "pointcloud.enable": "true",
             "depth_module.depth_profile": "848x480x30",
             "rgb_camera.color_profile": "848x480x30",
@@ -30,10 +38,10 @@ CAMERAS = {
             "hole_filling_filter.enable": "true",
         },
         "topics": {
-            "color_topic": "/camera/camera/color/image_raw",
-            "depth_topic": "/camera/camera/depth/image_rect_raw",
-            "color_info_topic": "/camera/camera/color/camera_info",
-            "depth_info_topic": "/camera/camera/depth/camera_info",
+            "color_topic": "/d435i/color/image_raw",
+            "depth_topic": "/d435i/depth/image_rect_raw",
+            "color_info_topic": "/d435i/color/camera_info",
+            "depth_info_topic": "/d435i/depth/camera_info",
         },
         "z_near": "300.0",
         "z_far": "2000.0",
@@ -45,14 +53,15 @@ CAMERAS = {
         "package": "orbbec_camera",
         "launch_file": "gemini_301_series.launch.py",
         "launch_arguments": {
+            "camera_name": "gemini305",     # topics /gemini305/..., frames gemini305_*
             "enable_colored_point_cloud": "true",
             "depth_registration": "true",
         },
         "topics": {
-            "color_topic": "/camera/color/image_raw",
-            "depth_topic": "/camera/depth/image_raw",
-            "color_info_topic": "/camera/color/camera_info",
-            "depth_info_topic": "/camera/depth/camera_info",
+            "color_topic": "/gemini305/color/image_raw",
+            "depth_topic": "/gemini305/depth/image_raw",
+            "color_info_topic": "/gemini305/color/camera_info",
+            "depth_info_topic": "/gemini305/depth/camera_info",
         },
         "z_near": "70.0",       # short-range camera
         "z_far": "500.0",
@@ -62,50 +71,58 @@ CAMERAS = {
 
 
 def launch_setup(context):
-    cam = CAMERAS[LaunchConfiguration("camera").perform(context)]
-    z_near = LaunchConfiguration("z_near").perform(context) or cam["z_near"]
-    z_far = LaunchConfiguration("z_far").perform(context) or cam["z_far"]
-    vacuum_radius = LaunchConfiguration("vacuum_radius").perform(context) or cam["vacuum_radius"]
-    camera = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([FindPackageShare(cam["package"]), "launch", cam["launch_file"]])),
-        launch_arguments=cam["launch_arguments"].items(),
-        condition=IfCondition(LaunchConfiguration("launch_camera")),
-    )
-    node = Node(
-        package="seg2grasp_ros",
-        executable="suction_node",
-        name="seg2grasp",
-        output="screen",
-        emulate_tty=True,
-        parameters=[{
-            **cam["topics"],
-            "roi": ParameterValue(LaunchConfiguration("roi"), value_type=str),
-            "vacuum_radius": float(vacuum_radius),
-            "seal_min": LaunchConfiguration("seal_min"),
-            "show": LaunchConfiguration("show"),
-            "fp16": LaunchConfiguration("fp16"),
-            "seg_min_size": LaunchConfiguration("seg_min_size"),
-            "z_near": float(z_near),
-            "z_far": float(z_far),
-            "hole_detection": LaunchConfiguration("hole_detection"),
-            "hole_margin": LaunchConfiguration("hole_margin"),
-        }],
-    )
-    return [camera, node]
+    choice = LaunchConfiguration("camera").perform(context)
+    actions = []
+    for name in (list(CAMERAS) if choice == "both" else [choice]):
+        cam = CAMERAS[name]
+        z_near = LaunchConfiguration("z_near").perform(context) or cam["z_near"]
+        z_far = LaunchConfiguration("z_far").perform(context) or cam["z_far"]
+        vacuum_radius = LaunchConfiguration("vacuum_radius").perform(context) or cam["vacuum_radius"]
+        # Scoped: arguments declared by one driver's launch file must not leak into the
+        # other's (rs_launch.py sets device_type:='', which stops the Orbbec driver).
+        actions.append(GroupAction([IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([FindPackageShare(cam["package"]), "launch", cam["launch_file"]])),
+            launch_arguments=cam["launch_arguments"].items(),
+        )], scoped=True, condition=IfCondition(LaunchConfiguration("launch_camera"))))
+        actions.append(Node(
+            package="seg2grasp_ros",
+            executable="suction_node",
+            namespace="seg2grasp",
+            name=name,                          # -> /seg2grasp/<camera>/suction_pose
+            output="screen",
+            emulate_tty=True,
+            parameters=[{
+                **cam["topics"],
+                "roi": ParameterValue(LaunchConfiguration("roi"), value_type=str),
+                "vacuum_radius": float(vacuum_radius),
+                "seal_min": LaunchConfiguration("seal_min"),
+                "show": LaunchConfiguration("show"),
+                "fp16": LaunchConfiguration("fp16"),
+                "seg_min_size": LaunchConfiguration("seg_min_size"),
+                "z_near": float(z_near),
+                "z_far": float(z_far),
+                "hole_detection": LaunchConfiguration("hole_detection"),
+                "hole_margin": LaunchConfiguration("hole_margin"),
+            }],
+        ))
+    return actions
 
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument("camera", default_value="d435i", choices=list(CAMERAS),
-                              description="camera to use: d435i (RealSense D435i) or gemini305 (Orbbec Gemini 305)"),
-        DeclareLaunchArgument("launch_camera", default_value="true", description="also start the camera driver"),
-        DeclareLaunchArgument("roi", default_value="", description="color-image crop 'y,x,h,w' (empty = full frame)"),
+        DeclareLaunchArgument("camera", default_value="d435i", choices=[*CAMERAS, "both"],
+                              description="camera to use: d435i (RealSense D435i), gemini305 (Orbbec Gemini 305) "
+                                          "or both (one suction node per camera)"),
+        DeclareLaunchArgument("launch_camera", default_value="true", description="also start the camera driver(s)"),
+        DeclareLaunchArgument("roi", default_value="",
+                              description="color-image crop 'y,x,h,w' (empty = full frame); with camera:=both it "
+                                          "applies to both cameras"),
         DeclareLaunchArgument("vacuum_radius", default_value="",
                               description="suction cup radius (mm); empty = camera default (d435i 30, gemini305 15)"),
         DeclareLaunchArgument("seal_min", default_value="0.98",
                               description="min fraction of the cup disc that must seal (0 = no seal check)"),
-        DeclareLaunchArgument("show", default_value="true", description="show the result window"),
+        DeclareLaunchArgument("show", default_value="true", description="show the result window(s)"),
         DeclareLaunchArgument("fp16", default_value="true", description="float16 segmentation inference (~3x faster)"),
         DeclareLaunchArgument("seg_min_size", default_value="0",
                               description="segmentation input short edge in px; 0 = model default 800 (smaller = faster, coarser)"),

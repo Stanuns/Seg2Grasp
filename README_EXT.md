@@ -34,21 +34,34 @@ source src/Seg2Grasp/venvs/seg/bin/activate
 
 **方式一：一条命令同时启动相机和节点**
 
-用 `camera` 参数选择相机：`d435i`（默认）或 `gemini305`。
+用 `camera` 参数选择相机：`d435i`（默认）、`gemini305`，或 `both` 同时使用两台。
 
 ```bash
 ros2 launch seg2grasp_ros seg2grasp.launch.py                       # RealSense D435i
 ros2 launch seg2grasp_ros seg2grasp.launch.py camera:=gemini305     # Orbbec Gemini 305
+ros2 launch seg2grasp_ros seg2grasp.launch.py camera:=both          # 两台相机同时使用
 ros2 launch seg2grasp_ros seg2grasp.launch.py roi:=20,140,440,500 vacuum_radius:=20.0
 ```
 
-两台相机不要同时启动：两者默认都发布 `camera_link`、`camera_color_optical_frame` 等同名 TF 坐标系。
+**两台相机同时使用**：每台相机始终以自己的名字运行（不论单开还是双开），topic、TF 坐标系和吸取点结果互不冲突；每台相机一个节点 `/seg2grasp/<相机名>`，各自加载分割模型、各开一个结果窗口（标题含节点名）。
+
+| | D435i | Gemini 305 |
+|---|---|---|
+| 相机 topic | `/d435i/color/image_raw`、`/d435i/depth/image_rect_raw` 等 | `/gemini305/color/image_raw`、`/gemini305/depth/image_raw` 等 |
+| TF 坐标系 | `d435i_link`、`d435i_color_optical_frame`、`d435i_depth_optical_frame` 等 | `gemini305_link`、`gemini305_color_optical_frame` 等 |
+| 节点 | `/seg2grasp/d435i` | `/seg2grasp/gemini305` |
+| 吸取点 | `/seg2grasp/d435i/suction_pose`（坐标系 `d435i_color_optical_frame`） | `/seg2grasp/gemini305/suction_pose`（坐标系 `gemini305_color_optical_frame`） |
+| 结果图 | `/seg2grasp/d435i/result_image` | `/seg2grasp/gemini305/result_image` |
+
+- `camera:=both` 时 `roi`、`vacuum_radius`、`z_near` 等参数对两个节点同时生效（留空的按各自相机取默认值）。两台相机需要不同的 `roi` 等参数时，分两个终端各启动一次：`camera:=d435i` 和 `camera:=gemini305`。
+- 两个节点共用一块 GPU，实测各约 1.5 Hz（单开约 2.2 Hz）。
 
 **方式二：相机和节点分开启动**
 
 ```bash
 # 终端 1：相机（D435i）
 ros2 launch realsense2_camera rs_launch.py \
+  camera_namespace:=/ camera_name:=d435i \
   pointcloud.enable:=true \
   depth_module.depth_profile:=848x480x30 \
   rgb_camera.color_profile:=848x480x30 \
@@ -58,22 +71,26 @@ ros2 launch realsense2_camera rs_launch.py \
 
 # 终端 1：相机（Gemini 305）
 ros2 launch orbbec_camera gemini_301_series.launch.py \
+  camera_name:=gemini305 \
   enable_colored_point_cloud:=true \
   depth_registration:=true
 
 # 终端 2：节点（只启动节点，camera 与终端 1 的相机一致）
 ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false
 ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false camera:=gemini305
-ros2 run seg2grasp_ros suction_node   # 或直接运行节点（默认订阅 D435i 的 topic）
+ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false camera:=both
+ros2 run seg2grasp_ros suction_node   # 或直接运行节点：/seg2grasp/d435i，订阅 D435i 的 topic
 ```
 
-Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开 `depth_registration`（这里也显式写出）：`/camera/depth/image_raw` 已对齐到彩色图（坐标系 `camera_color_optical_frame`，分辨率与彩色图相同），节点直接使用，不再做深度配准。
+相机必须带上 `camera_name`（D435i 还需 `camera_namespace:=/`），topic 和坐标系才是上表中的名字。
+
+Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开 `depth_registration`（这里也显式写出）：`/gemini305/depth/image_raw` 已对齐到彩色图（坐标系 `gemini305_color_optical_frame`，分辨率与彩色图相同），节点直接使用，不再做深度配准。
 
 | launch 参数 | 说明 |
 |---|---|
-| `camera` | 使用的相机：`d435i`（默认）或 `gemini305`；决定启动的相机驱动、订阅的 topic 和 `z_near` / `z_far` / `vacuum_radius` 默认值 |
+| `camera` | 使用的相机：`d435i`（默认）、`gemini305` 或 `both`；决定启动的相机驱动、节点、订阅的 topic 和 `z_near` / `z_far` / `vacuum_radius` 默认值 |
 | `launch_camera` | 是否同时启动相机，默认 `true` |
-| `roi` | 彩色图裁剪区域 `y,x,h,w`，默认整幅图 |
+| `roi` | 彩色图裁剪区域 `y,x,h,w`，默认整幅图；`camera:=both` 时对两台相机都生效 |
 | `vacuum_radius` | 吸盘半径（mm）；留空则按相机取默认值：`d435i` 为 30，`gemini305` 为 15（腕部相机视野中吸盘直径约 30 mm）。请设为实际吸盘半径：设大了会找不到足够大的平整区域（大量 `no graspable object`），平整度评估的范围也会跨过弯折 |
 | `seal_min` | 密封检查阈值：吸盘圆盘内能密封的像素比例下限，默认 0.98；设为 0 关闭检查 |
 | `show` | 是否显示结果窗口，默认 `true` |
@@ -83,14 +100,14 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 | `hole_detection` | 用彩色图识别工件上的孔洞，吸盘不覆盖孔洞，默认 `true`（见下文"孔洞识别"） |
 | `hole_margin` | 吸盘边缘与孔洞之间至少保留的实体宽度（mm），默认 2 |
 
-节点参数（`ros2 run ... --ros-args -p 参数:=值`）还包括 `color_topic`、`depth_topic`、`color_info_topic`、`depth_info_topic`。launch 会按 `camera` 自动设置；直接 `ros2 run` 时默认是 D435i 的 topic，使用 Gemini 305 时需手动指定：
+节点参数（`ros2 run ... --ros-args -p 参数:=值`）还包括 `color_topic`、`depth_topic`、`color_info_topic`、`depth_info_topic`。launch 会按 `camera` 自动设置；直接 `ros2 run` 时节点为 `/seg2grasp/d435i`、使用 D435i 的 topic，使用 Gemini 305 时需改节点名并指定 topic（`--ros-args -r __node:=gemini305 -p color_topic:=... ...`）：
 
 | 节点参数 | D435i（默认） | Gemini 305 |
 |---|---|---|
-| `color_topic` | `/camera/camera/color/image_raw` | `/camera/color/image_raw` |
-| `depth_topic` | `/camera/camera/depth/image_rect_raw` | `/camera/depth/image_raw` |
-| `color_info_topic` | `/camera/camera/color/camera_info` | `/camera/color/camera_info` |
-| `depth_info_topic` | `/camera/camera/depth/camera_info` | `/camera/depth/camera_info` |
+| `color_topic` | `/d435i/color/image_raw` | `/gemini305/color/image_raw` |
+| `depth_topic` | `/d435i/depth/image_rect_raw` | `/gemini305/depth/image_raw` |
+| `color_info_topic` | `/d435i/color/camera_info` | `/gemini305/color/camera_info` |
+| `depth_info_topic` | `/d435i/depth/camera_info` | `/gemini305/depth/camera_info` |
 | `z_near` | `300.0` | `70.0` |
 | `z_far` | `2000.0` | `500.0` |
 
@@ -99,18 +116,20 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 ## 处理方式
 
 - 节点始终处理**最新**的一帧：处理期间到达的帧会被丢弃，处理完立即取下一帧最新数据。
-- 两段流水线：后台线程分割新一帧的同时，主线程规划上一帧的吸取点。默认设置下 `/seg2grasp/suction_pose` 约 2 Hz、单帧延迟约 0.6 s（RTX 5080 Laptop 实测）；`seg_min_size:=600` 约 2.5 Hz，`480` 约 2.8 Hz。
+- 两段流水线：后台线程分割新一帧的同时，主线程规划上一帧的吸取点。默认设置下单台相机的 `suction_pose` 约 2 Hz、单帧延迟约 0.6 s（RTX 5080 Laptop 实测）；`seg_min_size:=600` 约 2.5 Hz，`480` 约 2.8 Hz。
 - 每处理完一帧就刷新结果窗口，窗口始终显示最新结果（左下角显示输出频率和延迟）。
-- 深度图会用两个相机的内参和 TF 外参自动对齐到彩色图；若深度已与彩色图对齐（坐标系和分辨率都相同），则跳过对齐。D435i 若启用了 `align_depth.enable:=true`，将 `depth_topic` 设为 `/camera/camera/aligned_depth_to_color/image_raw` 即可；Gemini 305 按上面的方式启动时深度已对齐。
+- 深度图会用两个相机的内参和 TF 外参自动对齐到彩色图；若深度已与彩色图对齐（坐标系和分辨率都相同），则跳过对齐。D435i 若启用了 `align_depth.enable:=true`，将 `depth_topic` 设为 `/d435i/aligned_depth_to_color/image_raw` 即可；Gemini 305 按上面的方式启动时深度已对齐。
 
 ## 输出
 
+每台相机一组（`<相机名>` 为 `d435i` 或 `gemini305`）：
+
 | Topic | 类型 | 说明 |
 |---|---|---|
-| `/seg2grasp/suction_pose` | `geometry_msgs/PoseStamped` | 吸取点位姿，坐标系 `camera_color_optical_frame`，单位 m；姿态的 z 轴为吸取接近方向（指向物体表面内） |
-| `/seg2grasp/result_image` | `sensor_msgs/Image`（bgr8） | 标注后的结果图 |
+| `/seg2grasp/<相机名>/suction_pose` | `geometry_msgs/PoseStamped` | 吸取点位姿，坐标系为该相机的 `<相机名>_color_optical_frame`，单位 m；姿态的 z 轴为吸取接近方向（指向物体表面内） |
+| `/seg2grasp/<相机名>/result_image` | `sensor_msgs/Image`（bgr8） | 标注后的结果图 |
 
-终端日志每帧输出一行 JSON：
+终端日志每帧输出一行 JSON，行首的 `[seg2grasp.<相机名>]` 表示来自哪台相机：
 
 ```json
 {"point_mm": [-89.8, -30.7, 515.5], "normal": [0.1446, 0.0287, -0.9891], "pixel": [320, 212], "target": 0}

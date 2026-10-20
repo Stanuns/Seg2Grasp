@@ -8,14 +8,15 @@ Two-stage pipeline: a worker thread segments the newest frame (GPU, float16 by
 default) while the main thread plans the suction point on the previous one. Frames
 that arrive while busy are dropped, and the window always shows the latest result.
 
-Publishes:
+Publishes (~ = /seg2grasp/<camera>):
     ~/suction_pose  geometry_msgs/PoseStamped  suction point (m) in the color optical
                     frame; the pose's z axis is the approach direction (into the surface)
     ~/result_image  sensor_msgs/Image (bgr8)   annotated result
 
     source venvs/seg/bin/activate && source install/setup.bash
-    ros2 run seg2grasp_ros suction_node
+    ros2 run seg2grasp_ros suction_node             # node /seg2grasp/d435i on the D435i topics
     ros2 launch seg2grasp_ros seg2grasp.launch.py   # also starts the camera
+    ros2 launch seg2grasp_ros seg2grasp.launch.py camera:=both   # one node per camera
 
 Quit with q/Esc in the window, by closing the window, or Ctrl+C.
 """
@@ -40,8 +41,6 @@ from seg2grasp.camera.depth_registration import backproject, register_depth_to_c
 from seg2grasp.pipeline import Seg2GraspPipeline
 from seg2grasp.segmentation.segmenter import Segmenter
 from seg2grasp.segmentation.visualize import annotate_result
-
-WINDOW = "Seg2Grasp (q=quit)"
 
 # Reliable, newest-only. Best-effort image subscriptions can receive nothing at all
 # when large images are fragmented over UDP (observed with CycloneDDS here).
@@ -85,11 +84,13 @@ def approach_quaternion(normal):
 
 class SuctionNode(Node):
     def __init__(self):
-        super().__init__("seg2grasp")
-        self.declare_parameter("color_topic", "/camera/camera/color/image_raw")
-        self.declare_parameter("depth_topic", "/camera/camera/depth/image_rect_raw")
-        self.declare_parameter("color_info_topic", "/camera/camera/color/camera_info")
-        self.declare_parameter("depth_info_topic", "/camera/camera/depth/camera_info")
+        # one node per camera, /seg2grasp/<camera>; the launch file sets name and topics
+        super().__init__("d435i", namespace="seg2grasp")
+        self.window = f"Seg2Grasp {self.get_fully_qualified_name()} (q=quit)"
+        self.declare_parameter("color_topic", "/d435i/color/image_raw")
+        self.declare_parameter("depth_topic", "/d435i/depth/image_rect_raw")
+        self.declare_parameter("color_info_topic", "/d435i/color/camera_info")
+        self.declare_parameter("depth_info_topic", "/d435i/depth/camera_info")
         self.declare_parameter("roi", "")                 # "y,x,h,w" crop of the color image
         self.declare_parameter("vacuum_radius", 30.0)     # suction cup radius (mm)
         self.declare_parameter("seal_min", 0.98)          # min sealing fraction of the cup disc; 0 = off
@@ -297,13 +298,13 @@ def main():
             if item is not None:
                 vis = node.finish(item)
                 if node.show:
-                    cv2.imshow(WINDOW, vis)
+                    cv2.imshow(node.window, vis)
                     shown = True
             if node.show:
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27):
                     break
-                if shown and cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                if shown and cv2.getWindowProperty(node.window, cv2.WND_PROP_VISIBLE) < 1:
                     break
     except KeyboardInterrupt:
         pass
