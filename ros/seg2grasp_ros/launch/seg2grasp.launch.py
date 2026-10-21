@@ -21,8 +21,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 # Per camera (the key is also its name): driver launch file, its arguments, the topics the
-# node subscribes to, the default depth band (mm) of object points used for grasping, and
-# the default radius (mm) of the suction cup used with that camera.
+# node subscribes to, and the default depth band (mm) of object points used for grasping.
 CAMERAS = {
     "d435i": {
         "package": "realsense2_camera",
@@ -45,7 +44,6 @@ CAMERAS = {
         },
         "z_near": "300.0",
         "z_far": "2000.0",
-        "vacuum_radius": "30.0",
     },
     # enable_colored_point_cloud makes the driver align depth to color itself (depth_registration),
     # so depth/image_raw is already on the color grid and the node skips its own registration.
@@ -65,7 +63,6 @@ CAMERAS = {
         },
         "z_near": "70.0",       # short-range camera
         "z_far": "500.0",
-        "vacuum_radius": "15.0",    # wrist-mounted with a ~30 mm diameter cup
     },
 }
 
@@ -77,7 +74,6 @@ def launch_setup(context):
         cam = CAMERAS[name]
         z_near = LaunchConfiguration("z_near").perform(context) or cam["z_near"]
         z_far = LaunchConfiguration("z_far").perform(context) or cam["z_far"]
-        vacuum_radius = LaunchConfiguration("vacuum_radius").perform(context) or cam["vacuum_radius"]
         # Scoped: arguments declared by one driver's launch file must not leak into the
         # other's (rs_launch.py sets device_type:='', which stops the Orbbec driver).
         actions.append(GroupAction([IncludeLaunchDescription(
@@ -95,7 +91,7 @@ def launch_setup(context):
             parameters=[{
                 **cam["topics"],
                 "roi": ParameterValue(LaunchConfiguration("roi"), value_type=str),
-                "vacuum_radius": float(vacuum_radius),
+                "vacuum_radius": LaunchConfiguration("vacuum_radius"),
                 "seal_min": LaunchConfiguration("seal_min"),
                 "show": LaunchConfiguration("show"),
                 "fp16": LaunchConfiguration("fp16"),
@@ -118,8 +114,9 @@ def generate_launch_description():
         DeclareLaunchArgument("roi", default_value="",
                               description="color-image crop 'y,x,h,w' (empty = full frame); with camera:=both it "
                                           "applies to both cameras"),
-        DeclareLaunchArgument("vacuum_radius", default_value="",
-                              description="suction cup radius (mm); empty = camera default (d435i 30, gemini305 15)"),
+        DeclareLaunchArgument("vacuum_radius", default_value="15.0",
+                              description="suction cup radius (mm); a property of the robot's cup, the same "
+                                          "whichever camera looks"),
         DeclareLaunchArgument("seal_min", default_value="0.98",
                               description="min fraction of the cup disc that must seal (0 = no seal check)"),
         DeclareLaunchArgument("show", default_value="true", description="show the result window(s)"),

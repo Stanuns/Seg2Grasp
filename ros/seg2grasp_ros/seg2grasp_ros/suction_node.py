@@ -92,7 +92,7 @@ class SuctionNode(Node):
         self.declare_parameter("color_info_topic", "/d435i/color/camera_info")
         self.declare_parameter("depth_info_topic", "/d435i/depth/camera_info")
         self.declare_parameter("roi", "")                 # "y,x,h,w" crop of the color image
-        self.declare_parameter("vacuum_radius", 30.0)     # suction cup radius (mm)
+        self.declare_parameter("vacuum_radius", 15.0)     # suction cup radius (mm), the robot's ~30 mm cup
         self.declare_parameter("seal_min", 0.98)          # min sealing fraction of the cup disc; 0 = off
         self.declare_parameter("show", True)              # display window
         self.declare_parameter("sync_slop", 0.02)         # color/depth stamp tolerance (s)

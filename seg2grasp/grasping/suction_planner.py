@@ -134,6 +134,23 @@ def suction_candidates(surface, vacuum_radius=30.0, spacing=None, min_points=8, 
             for i in np.flatnonzero(ok)]
 
 
+def _depth_consistent(pc_img, member, min_extent=50.0):
+    """``member`` without points whose depth cannot belong to the object.
+
+    Specular glints can give a patch of bogus depth far from the part (seen ~0.9 m
+    behind it); such a patch is flat and would pass the flatness and seal checks.
+    A part's visible surface spans at most about its own size in depth, so points
+    farther than its lateral extent (robust 5-95 % span of x and y, at least
+    ``min_extent`` mm) from its median depth are dropped.
+    """
+    pts = pc_img[member]
+    if len(pts) < 10:
+        return member
+    lo, hi = np.percentile(pts[:, :2], [5, 95], axis=0)
+    extent = max(float(np.hypot(*(hi - lo))), min_extent)
+    return member & (np.abs(pc_img[:, :, 2] - np.median(pts[:, 2])) <= extent)
+
+
 def _pixel_model(pc_img, max_samples=5000):
     """Recover the pinhole mapping ``u = fx*x/z + cx, v = fy*y/z + cy`` of an
     organized cloud, so pixels without depth can still be cast as rays. Works on
@@ -386,6 +403,8 @@ def estimate_suction_point(pc_img, mask=None, downsample_rate=5,
     """
     in_band = (pc_img[:, :, 2] > z_near) & (pc_img[:, :, 2] < z_far)
     member = in_band & mask.astype(bool) if mask is not None else in_band
+    if mask is not None:
+        member = _depth_consistent(pc_img, member)
     if holes is not None:
         member = member & ~holes
     if mask is not None:
