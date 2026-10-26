@@ -3,7 +3,7 @@ name = "seg2grasp"
 version = "1.0.0"
 description = "Seg2Grasp: A Robust Modular Suction Grasping in Bin Picking (IROS 2024) — segmentation + suction grasping + open-vocabulary classification."
 readme = "README.md"
-requires-python = ">=3.10,<3.11"
+requires-python = ">=3.10,<3.13"   # 3.10: Ubuntu 22.04 / ROS 2 Humble, 3.12: Ubuntu 24.04 / ROS 2 Jazzy
 license = { file = "LICENSE" }
 
 # NOTE: torch/torchvision (cu124), detectron2 (from source) and the MSDeformAttn

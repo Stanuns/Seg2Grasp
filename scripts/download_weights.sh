@@ -13,12 +13,13 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DST="$REPO/data/checkpoints/segmentation"
 HF="${SEG2GRASP_WEIGHTS_HF:-jkim50104/Seg2Grasp}"
-BASE="https://huggingface.co/${HF}/resolve/main"
+BASE="${HF_ENDPOINT:-https://huggingface.co}/${HF}/resolve/main"   # HF_ENDPOINT: e.g. https://hf-mirror.com
 mkdir -p "$DST"
 
-echo ">>> Downloading segmentation checkpoint from https://huggingface.co/${HF} ..."
-curl -L --fail "${BASE}/model_final.pth" -o "$DST/model_final.pth"
-curl -L --fail "${BASE}/config.yaml"     -o "$DST/config.yaml"
+echo ">>> Downloading segmentation checkpoint from ${BASE%/resolve/main} ..."
+# Resumable: re-running continues a partial download instead of starting over.
+curl -L --fail --retry 20 --retry-all-errors -C - "${BASE}/model_final.pth" -o "$DST/model_final.pth"
+curl -L --fail --retry 5 "${BASE}/config.yaml"     -o "$DST/config.yaml"
 
 if [[ -f "$DST/model_final.pth" && -f "$DST/config.yaml" ]]; then
     echo ">>> Done: $DST/{model_final.pth, config.yaml}"

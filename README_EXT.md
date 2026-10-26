@@ -2,20 +2,27 @@
 
 以 ROS 2 节点运行：订阅相机（RealSense D435i 或 Orbbec Gemini 305）的彩色图与深度图 topic，实时输出目标物的吸取点（只用分割 + 抓取，不使用 Qwen 分类）。
 
-环境：Ubuntu 22.04、ROS 2 Humble、`realsense2_camera`（realsense-ros 4.x）、`orbbec_camera`（OrbbecSDK_ROS2，使用 Gemini 305 时需要）。
+环境：Ubuntu 24.04、ROS 2 Jazzy、`realsense2_camera`（apt 安装的 `ros-jazzy-realsense2-camera`）、`orbbec_camera`（OrbbecSDK_ROS2 v2-main 源码编译，使用 Gemini 305 时需要）。已在 Jetson Thor（JetPack 7 / L4T R39、CUDA 13.2）上验证；原先的 Ubuntu 22.04 + ROS 2 Humble 环境见文末"Humble 与 Jazzy 的差异"。
 
 ## 环境准备
 
 ```bash
 cd ~/ksdy_ws/ws_seg2grasp/src/Seg2Grasp
-bash scripts/setup_seg_env.sh        # 创建 venvs/seg（无需运行 setup_qwen_env.sh）
+sudo bash scripts/install_system_jazzy.sh   # ROS 2 Jazzy、CUDA toolkit、python3.12-dev、realsense2_camera、Orbbec 依赖、udev 规则
+bash scripts/setup_seg_env.sh        # 创建 venvs/seg（Python 3.12；无需运行 setup_qwen_env.sh）
 bash scripts/download_weights.sh     # 下载分割模型权重到 data/checkpoints/segmentation/
 
+# Orbbec 驱动（OrbbecSDK_ROS2 已克隆到 ~/ksdy_ws/orbbec_ws/src，分支 v2-main）
+cd ~/ksdy_ws/orbbec_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+
 cd ~/ksdy_ws/ws_seg2grasp
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 colcon build --packages-select seg2grasp_ros
 ```
 
+> `install_system_jazzy.sh` 运行前需先把 OrbbecSDK_ROS2 克隆到 `~/ksdy_ws/orbbec_ws/src/OrbbecSDK_ROS2`（脚本用 rosdep 安装它的依赖）。装完 udev 规则后重新插拔相机。
 > 不要用 `--symlink-install`：该模式生成的节点入口固定为 `/usr/bin/python3`，找不到 venv 中的 torch。
 > 只修改 `seg2grasp/` 下的算法代码无需重新编译；修改 `ros/seg2grasp_ros/` 下的节点或 launch 文件后需重新 `colcon build`。
 
@@ -25,8 +32,7 @@ colcon build --packages-select seg2grasp_ros
 
 ```bash
 cd ~/ksdy_ws/ws_seg2grasp
-source /opt/ros/humble/setup.bash
-source ~/ksdy_ws/embodied_ws/install/setup.bash   # realsense2_camera 所在工作区
+source /opt/ros/jazzy/setup.bash                  # 已包含 apt 安装的 realsense2_camera
 source ~/ksdy_ws/orbbec_ws/install/setup.bash     # orbbec_camera 所在工作区
 source install/setup.bash
 source src/Seg2Grasp/venvs/seg/bin/activate
@@ -45,13 +51,13 @@ ros2 launch seg2grasp_ros seg2grasp.launch.py roi:=20,140,440,500 vacuum_radius:
 
 **两台相机同时使用**：每台相机始终以自己的名字运行（不论单开还是双开），topic、TF 坐标系和吸取点结果互不冲突；每台相机一个节点 `/seg2grasp/<相机名>`，各自加载分割模型、各开一个结果窗口（标题含节点名）。
 
-| | D435i | Gemini 305 |
-|---|---|---|
-| 相机 topic | `/d435i/color/image_raw`、`/d435i/depth/image_rect_raw` 等 | `/gemini305/color/image_raw`、`/gemini305/depth/image_raw` 等 |
-| TF 坐标系 | `d435i_link`、`d435i_color_optical_frame`、`d435i_depth_optical_frame` 等 | `gemini305_link`、`gemini305_color_optical_frame` 等 |
-| 节点 | `/seg2grasp/d435i` | `/seg2grasp/gemini305` |
-| 吸取点 | `/seg2grasp/d435i/suction_pose`（坐标系 `d435i_color_optical_frame`） | `/seg2grasp/gemini305/suction_pose`（坐标系 `gemini305_color_optical_frame`） |
-| 结果图 | `/seg2grasp/d435i/result_image` | `/seg2grasp/gemini305/result_image` |
+|            | D435i                                                                           | Gemini 305                                                                        |
+| ---------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| 相机 topic | `/d435i/color/image_raw`、`/d435i/depth/image_rect_raw` 等                  | `/gemini305/color/image_raw`、`/gemini305/depth/image_raw` 等                 |
+| TF 坐标系  | `d435i_link`、`d435i_color_optical_frame`、`d435i_depth_optical_frame` 等 | `gemini305_link`、`gemini305_color_optical_frame` 等                          |
+| 节点       | `/seg2grasp/d435i`                                                            | `/seg2grasp/gemini305`                                                          |
+| 吸取点     | `/seg2grasp/d435i/suction_pose`（坐标系 `d435i_color_optical_frame`）       | `/seg2grasp/gemini305/suction_pose`（坐标系 `gemini305_color_optical_frame`） |
+| 结果图     | `/seg2grasp/d435i/result_image`                                               | `/seg2grasp/gemini305/result_image`                                             |
 
 - `camera:=both` 时 `roi`、`vacuum_radius`、`z_near` 等参数对两个节点同时生效（`z_near` / `z_far` 留空的按各自相机取默认值）。两台相机需要不同的 `roi` 等参数时，分两个终端各启动一次：`camera:=d435i` 和 `camera:=gemini305`。
 - 两个节点共用一块 GPU，实测各约 1.5 Hz（单开约 2.2 Hz）。
@@ -86,30 +92,30 @@ ros2 run seg2grasp_ros suction_node   # 或直接运行节点：/seg2grasp/d435i
 
 Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开 `depth_registration`（这里也显式写出）：`/gemini305/depth/image_raw` 已对齐到彩色图（坐标系 `gemini305_color_optical_frame`，分辨率与彩色图相同），节点直接使用，不再做深度配准。
 
-| launch 参数 | 说明 |
-|---|---|
-| `camera` | 使用的相机：`d435i`（默认）、`gemini305` 或 `both`；决定启动的相机驱动、节点、订阅的 topic 和 `z_near` / `z_far` 默认值 |
-| `launch_camera` | 是否同时启动相机，默认 `true` |
-| `roi` | 彩色图裁剪区域 `y,x,h,w`，默认整幅图；`camera:=both` 时对两台相机都生效 |
-| `vacuum_radius` | 吸盘半径（mm），默认 15（机械臂吸盘直径约 30 mm）。吸盘属于机械臂，两台相机用同一个值。请设为实际吸盘半径：设大了会找不到足够大的平整区域（大量 `no graspable object`，如 30 mm 时两台相机在冲压支架上几乎都找不到吸取点），平整度评估的范围也会跨过弯折 |
-| `seal_min` | 密封检查阈值：吸盘圆盘内能密封的像素比例下限，默认 0.98；设为 0 关闭检查 |
-| `show` | 是否显示结果窗口，默认 `true` |
-| `fp16` | 分割模型用 float16 推理，默认 `true`（比 float32 快约 3 倍，结果几乎相同） |
-| `seg_min_size` | 分割输入图像短边像素，默认 `0`（即模型默认 800）；设为 600 / 480 更快，但分割更粗 |
-| `z_near` / `z_far` | 抓取使用的物体深度范围（mm），范围外的点被忽略；留空则按相机取默认值：`d435i` 为 300 / 2000，`gemini305` 为 70 / 500 |
-| `hole_detection` | 用彩色图识别工件上的孔洞，吸盘不覆盖孔洞，默认 `true`（见下文"孔洞识别"） |
-| `hole_margin` | 吸盘边缘与孔洞之间至少保留的实体宽度（mm），默认 2 |
+| launch 参数            | 说明                                                                                                                                                                                                                                                       |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `camera`             | 使用的相机：`d435i`（默认）、`gemini305` 或 `both`；决定启动的相机驱动、节点、订阅的 topic 和 `z_near` / `z_far` 默认值                                                                                                                          |
+| `launch_camera`      | 是否同时启动相机，默认 `true`                                                                                                                                                                                                                            |
+| `roi`                | 彩色图裁剪区域 `y,x,h,w`，默认整幅图；`camera:=both` 时对两台相机都生效                                                                                                                                                                                |
+| `vacuum_radius`      | 吸盘半径（mm），默认 15（机械臂吸盘直径约 30 mm）。吸盘属于机械臂，两台相机用同一个值。请设为实际吸盘半径：设大了会找不到足够大的平整区域（大量 `no graspable object`，如 30 mm 时两台相机在冲压支架上几乎都找不到吸取点），平整度评估的范围也会跨过弯折 |
+| `seal_min`           | 密封检查阈值：吸盘圆盘内能密封的像素比例下限，默认 0.98；设为 0 关闭检查                                                                                                                                                                                   |
+| `show`               | 是否显示结果窗口，默认 `true`                                                                                                                                                                                                                            |
+| `fp16`               | 分割模型用 float16 推理，默认 `true`（比 float32 快约 3 倍，结果几乎相同）                                                                                                                                                                               |
+| `seg_min_size`       | 分割输入图像短边像素，默认 `0`（即模型默认 800）；设为 600 / 480 更快，但分割更粗                                                                                                                                                                        |
+| `z_near` / `z_far` | 抓取使用的物体深度范围（mm），范围外的点被忽略；留空则按相机取默认值：`d435i` 为 300 / 2000，`gemini305` 为 70 / 500                                                                                                                                   |
+| `hole_detection`     | 用彩色图识别工件上的孔洞，吸盘不覆盖孔洞，默认 `true`（见下文"孔洞识别"）                                                                                                                                                                                |
+| `hole_margin`        | 吸盘边缘与孔洞之间至少保留的实体宽度（mm），默认 2                                                                                                                                                                                                         |
 
 节点参数（`ros2 run ... --ros-args -p 参数:=值`）还包括 `color_topic`、`depth_topic`、`color_info_topic`、`depth_info_topic`。launch 会按 `camera` 自动设置；直接 `ros2 run` 时节点为 `/seg2grasp/d435i`、使用 D435i 的 topic，使用 Gemini 305 时需改节点名并指定 topic（`--ros-args -r __node:=gemini305 -p color_topic:=... ...`）：
 
-| 节点参数 | D435i（默认） | Gemini 305 |
-|---|---|---|
-| `color_topic` | `/d435i/color/image_raw` | `/gemini305/color/image_raw` |
-| `depth_topic` | `/d435i/depth/image_rect_raw` | `/gemini305/depth/image_raw` |
-| `color_info_topic` | `/d435i/color/camera_info` | `/gemini305/color/camera_info` |
-| `depth_info_topic` | `/d435i/depth/camera_info` | `/gemini305/depth/camera_info` |
-| `z_near` | `300.0` | `70.0` |
-| `z_far` | `2000.0` | `500.0` |
+| 节点参数             | D435i（默认）                   | Gemini 305                       |
+| -------------------- | ------------------------------- | -------------------------------- |
+| `color_topic`      | `/d435i/color/image_raw`      | `/gemini305/color/image_raw`   |
+| `depth_topic`      | `/d435i/depth/image_rect_raw` | `/gemini305/depth/image_raw`   |
+| `color_info_topic` | `/d435i/color/camera_info`    | `/gemini305/color/camera_info` |
+| `depth_info_topic` | `/d435i/depth/camera_info`    | `/gemini305/depth/camera_info` |
+| `z_near`           | `300.0`                       | `70.0`                         |
+| `z_far`            | `2000.0`                      | `500.0`                        |
 
 退出：在结果窗口按 `q` / Esc、关闭窗口，或在终端按 Ctrl+C。
 
@@ -124,10 +130,10 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 
 每台相机一组（`<相机名>` 为 `d435i` 或 `gemini305`）：
 
-| Topic | 类型 | 说明 |
-|---|---|---|
+| Topic                                | 类型                          | 说明                                                                                                               |
+| ------------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `/seg2grasp/<相机名>/suction_pose` | `geometry_msgs/PoseStamped` | 吸取点位姿，坐标系为该相机的 `<相机名>_color_optical_frame`，单位 m；姿态的 z 轴为吸取接近方向（指向物体表面内） |
-| `/seg2grasp/<相机名>/result_image` | `sensor_msgs/Image`（bgr8） | 标注后的结果图 |
+| `/seg2grasp/<相机名>/result_image` | `sensor_msgs/Image`（bgr8） | 标注后的结果图                                                                                                     |
 
 终端日志每帧输出一行 JSON，行首的 `[seg2grasp.<相机名>]` 表示来自哪台相机：
 
@@ -144,12 +150,12 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 
 候选吸取点按 2/3 吸盘半径的间距均匀分布在工件表面，另在工件中心处额外加一个候选点。每个候选点按四项加权打分：
 
-| 项 | 权重 | 含义 |
-|---|---|---|
-| 居中 | 0.30 | 离工件中心越近越好 |
+| 项         | 权重 | 含义                                     |
+| ---------- | ---- | ---------------------------------------- |
+| 居中       | 0.30 | 离工件中心越近越好                       |
 | 周边平整度 | 0.40 | 吸盘周边越平整越好，避开弯折、凸筋、褶皱 |
-| 朝向 | 0.25 | 吸取面越正对相机越好 |
-| 支撑点数 | 0.05 | 吸盘范围内的有效点越多越好 |
+| 朝向       | 0.25 | 吸取面越正对相机越好                     |
+| 支撑点数   | 0.05 | 吸盘范围内的有效点越多越好               |
 
 得分从高到低依次做密封检查，第一个通过的候选点即为输出的吸取点。
 
@@ -201,3 +207,29 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 - 工件表面到相机的距离需在 `z_near`–`z_far` 之间（D435i 默认 300–2000 mm，Gemini 305 默认 70–500 mm）。
 - 程序选择离相机最近（最高）的物体；画面边缘有杂物时，用 `roi` 只保留工件区域。
 - 中心深度不在 `z_near`–`z_far` 内的物体不作为目标，例如腕部相机视野中的夹爪本体。机器人自身的吸盘若在该范围内，因其表面弯曲通常不会被选中；如需彻底排除，可调大 `z_near` 或用 `roi` 裁掉。
+
+## Humble 与 Jazzy 的差异
+
+ROS 节点和 launch 文件只用到 rclpy、message_filters、tf2_ros 和 launch_ros 的常规接口，Humble 和 Jazzy 都能用，代码无需修改。需要改的是运行环境：
+
+|                   | Ubuntu 22.04 + Humble          | Ubuntu 24.04 + Jazzy                                                                                                             |
+| ----------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| venv 的 Python    | 3.10                           | 3.12（系统 `/usr/bin/python3.12`）。rclpy 是 C 扩展，只能在编译它的 Python 版本下导入，所以 venv 的 Python 版本必须和 ROS 一致 |
+| `source`        | `/opt/ros/humble/setup.bash` | `/opt/ros/jazzy/setup.bash`                                                                                                    |
+| realsense2_camera | 源码工作区                     | apt：`ros-jazzy-realsense2-camera`（4.58，自带 librealsense 2.58）                                                             |
+| orbbec_camera     | 源码工作区                     | 源码工作区 `~/ksdy_ws/orbbec_ws`（OrbbecSDK_ROS2 v2-main）                                                                     |
+| PyTorch           | cu128（x86 Blackwell，sm_120） | Jetson Thor：`torch 2.12.1+cu132`（aarch64，sm_110），与 JetPack 7 的 CUDA 13.2 一致                                           |
+
+`setup_seg_env.sh` 会按机器架构选 PyTorch 版本和 CUDA 架构，也可以用 `TORCH_INDEX`、`TORCH_PKGS`、`TORCH_CUDA_ARCH_LIST`、`PYTHON` 环境变量覆盖。
+
+网络慢时（国内）可用镜像：
+
+```bash
+TORCH_WHL_MIRROR=https://mirrors.nju.edu.cn/pytorch/whl \
+UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple bash scripts/setup_seg_env.sh
+HF_ENDPOINT=https://hf-mirror.com bash scripts/download_weights.sh   # 中断后重新运行会续传
+```
+
+`install_system_jazzy.sh` 默认使用清华 ROS 2 镜像（`ROS_MIRROR` 可改为 `http://packages.ros.org/ros2/ubuntu`），系统缺少 `noble-updates` 源时会自动补上（ROS 2 Jazzy 的 boost 等 -dev 包依赖它）。
+
+Jetson 注意事项：JetPack 预装的是 NVIDIA 的 OpenCV 4.8（`libopencv-dev`），而 apt 的 cv_bridge 链接的是 Ubuntu 的 OpenCV 4.6，编译 orbbec_camera 时会出现 `libopencv_*.so.406 may conflict with .so.408` 的链接警告，可以忽略。Seg2Grasp 节点不使用 cv_bridge，不受这个问题影响。
