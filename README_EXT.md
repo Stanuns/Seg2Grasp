@@ -8,7 +8,7 @@
 
 ```bash
 cd ~/ksdy_ws/ws_seg2grasp/src/Seg2Grasp
-bash scripts/setup_seg_env.sh        # 创建 venvs/seg（无需运行 setup_qwen_env.sh）
+bash scripts/setup_seg_env.sh        # 创建 venvs/seg（无需运行 setup_qwen_env.sh）；Jetson 上改用 setup_seg_env_jetson.sh，见下文
 bash scripts/download_weights.sh     # 下载分割模型权重到 data/checkpoints/segmentation/
 
 cd ~/ksdy_ws/ws_seg2grasp
@@ -21,9 +21,26 @@ colcon build --packages-select seg2grasp_ros
 
 ### Jetson Orin NX（JetPack 6）
 
-`scripts/setup_seg_env.sh` 面向 x86 + Blackwell 显卡（cu128），在 Jetson 上不能直接使用。以下步骤已在 Jetson Orin NX Super（JetPack 6.x / L4T R36.5、CUDA 12.6、Ubuntu 22.04、ROS 2 Humble）上验证：
+`scripts/setup_seg_env.sh` 面向 x86 + Blackwell 显卡（cu128），在 Jetson 上不能直接使用，改用 `scripts/setup_seg_env_jetson.sh`。已在 Jetson Orin NX Super（JetPack 6.x / L4T R36.5、CUDA 12.6、Ubuntu 22.04、ROS 2 Humble）上验证：
 
-| 项 | `setup_seg_env.sh` | Jetson Orin NX |
+```bash
+cd ~/ksdy_ws/ws_seg2grasp/src/Seg2Grasp
+bash scripts/setup_seg_env_jetson.sh   # 创建 venvs/seg，最后检查 CUDA 可用、架构为 sm_87
+bash scripts/download_weights.sh       # 或手动把 model_final.pth + config.yaml 放到 data/checkpoints/segmentation/
+```
+
+之后与上面相同，`colcon build --packages-select seg2grasp_ros`。脚本可用环境变量覆盖默认值：
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `TORCH_CUDA_ARCH_LIST` | `8.7` | 编译架构（Orin 为 8.7） |
+| `TORCH_INDEX` | `https://pypi.jetson-ai-lab.io/jp6/cu126` | Jetson PyTorch wheel 源（JetPack 6 / CUDA 12.6） |
+| `CUDA_HOME` | `/usr/local/cuda` | CUDA 工具链 |
+| `MAX_JOBS` | `4` | 并行编译数；内存不足导致编译被杀时调小 |
+
+与 `setup_seg_env.sh` 的区别：
+
+| 项 | `setup_seg_env.sh` | `setup_seg_env_jetson.sh` |
 |---|---|---|
 | 创建 venv | `uv venv --python 3.10` | `python3 -m venv`（系统 Python 3.10，与 ROS 2 Humble 的 rclpy 兼容） |
 | PyTorch | cu128 官方 wheel | NVIDIA JetPack 6 专用 wheel：torch 2.8.0 / torchvision 0.23.0（jetson-ai-lab 源，CUDA 12.6） |
@@ -31,26 +48,6 @@ colcon build --packages-select seg2grasp_ros
 | opencv | 不限版本 | `opencv-python<4.12`（新版要求 numpy 2，与 `numpy<2` 冲突） |
 | 分割权重 | `download_weights.sh` | 相同；也可手动把 `model_final.pth` + `config.yaml` 放到 `data/checkpoints/segmentation/` |
 | Qwen 环境 | `setup_qwen_env.sh` | 不安装（ROS 节点不使用分类） |
-
-```bash
-cd ~/ksdy_ws/ws_seg2grasp/src/Seg2Grasp
-python3 -m venv venvs/seg
-touch venvs/COLCON_IGNORE
-source venvs/seg/bin/activate
-pip install -U pip setuptools wheel
-pip install torch==2.8.0 torchvision==0.23.0 --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
-pip install "numpy<2" "opencv-python>=4.9,<4.12" "open3d>=0.18" "pillow>=10.0" \
-    "scipy>=1.11" "scikit-image>=0.22" "matplotlib>=3.7" tqdm pyyaml imageio \
-    timm shapely pycocotools "fvcore>=0.1.5" "iopath>=0.1.9" cython ninja
-
-export CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH
-export TORCH_CUDA_ARCH_LIST=8.7 FORCE_CUDA=1 MAX_JOBS=4
-pip install --no-build-isolation "git+https://github.com/facebookresearch/detectron2.git"
-( cd third_party/mask2former/modeling/pixel_decoder/ops && python setup.py build install )
-pip install -e . --no-deps
-
-python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_arch_list())"   # True ['sm_87']
-```
 
 > `~/.local` 中若有 pip 装的非 Jetson 版 torch（如 `+cu130`），在 JetPack 6 上 `torch.cuda.is_available()` 为 `False`；venv 不受影响，但不要用系统 `python3` 运行本项目。
 
