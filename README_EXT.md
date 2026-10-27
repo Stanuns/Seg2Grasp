@@ -19,6 +19,54 @@ colcon build --packages-select seg2grasp_ros
 > 不要用 `--symlink-install`：该模式生成的节点入口固定为 `/usr/bin/python3`，找不到 venv 中的 torch。
 > 只修改 `seg2grasp/` 下的算法代码无需重新编译；修改 `ros/seg2grasp_ros/` 下的节点或 launch 文件后需重新 `colcon build`。
 
+### Jetson Orin NX（JetPack 6）
+
+`scripts/setup_seg_env.sh` 面向 x86 + Blackwell 显卡（cu128），在 Jetson 上不能直接使用。以下步骤已在 Jetson Orin NX Super（JetPack 6.x / L4T R36.5、CUDA 12.6、Ubuntu 22.04、ROS 2 Humble）上验证：
+
+| 项 | `setup_seg_env.sh` | Jetson Orin NX |
+|---|---|---|
+| 创建 venv | `uv venv --python 3.10` | `python3 -m venv`（系统 Python 3.10，与 ROS 2 Humble 的 rclpy 兼容） |
+| PyTorch | cu128 官方 wheel | NVIDIA JetPack 6 专用 wheel：torch 2.8.0 / torchvision 0.23.0（jetson-ai-lab 源，CUDA 12.6） |
+| 编译架构 | `TORCH_CUDA_ARCH_LIST=12.0` | `8.7`（Orin），并设 `MAX_JOBS=4`，防止编译时内存不足 |
+| opencv | 不限版本 | `opencv-python<4.12`（新版要求 numpy 2，与 `numpy<2` 冲突） |
+| 分割权重 | `download_weights.sh` | 相同；也可手动把 `model_final.pth` + `config.yaml` 放到 `data/checkpoints/segmentation/` |
+| Qwen 环境 | `setup_qwen_env.sh` | 不安装（ROS 节点不使用分类） |
+
+```bash
+cd ~/ksdy_ws/ws_seg2grasp/src/Seg2Grasp
+python3 -m venv venvs/seg
+touch venvs/COLCON_IGNORE
+source venvs/seg/bin/activate
+pip install -U pip setuptools wheel
+pip install torch==2.8.0 torchvision==0.23.0 --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+pip install "numpy<2" "opencv-python>=4.9,<4.12" "open3d>=0.18" "pillow>=10.0" \
+    "scipy>=1.11" "scikit-image>=0.22" "matplotlib>=3.7" tqdm pyyaml imageio \
+    timm shapely pycocotools "fvcore>=0.1.5" "iopath>=0.1.9" cython ninja
+
+export CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH
+export TORCH_CUDA_ARCH_LIST=8.7 FORCE_CUDA=1 MAX_JOBS=4
+pip install --no-build-isolation "git+https://github.com/facebookresearch/detectron2.git"
+( cd third_party/mask2former/modeling/pixel_decoder/ops && python setup.py build install )
+pip install -e . --no-deps
+
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_arch_list())"   # True ['sm_87']
+```
+
+> `~/.local` 中若有 pip 装的非 Jetson 版 torch（如 `+cu130`），在 JetPack 6 上 `torch.cuda.is_available()` 为 `False`；venv 不受影响，但不要用系统 `python3` 运行本项目。
+
+Jetson 上的使用差异：
+
+- 加载环境时不需要 `source ~/ksdy_ws/embodied_ws/install/setup.bash`：`realsense2_camera` 由 apt（`ros-humble-realsense2-camera`）安装在 `/opt/ros/humble` 中。
+- 建议加 `seg_min_size:=480`。实测（40W 模式）：
+
+  | 设置 | `suction_pose` 频率 | 延迟 |
+  |---|---|---|
+  | D435i 单开，默认 800 | 约 0.3 Hz | 约 3.2 s |
+  | D435i 单开，`seg_min_size:=480` | 约 0.6 Hz | 约 2.2 s |
+  | `camera:=both`，`seg_min_size:=480` | 各约 0.3 Hz | 约 4.5 s |
+
+- `camera:=both` 时两个模型共占约 13 GB 内存（16 GB 板），运行时请关闭其他程序。
+
 ## 运行
 
 每个新终端先加载环境（顺序不能乱，venv 必须最后激活）：
