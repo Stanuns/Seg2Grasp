@@ -103,6 +103,11 @@ class SuctionNode(Node):
         self.declare_parameter("z_far", 2000.0)
         self.declare_parameter("hole_detection", True)    # find holes in the color image, keep the cup off them
         self.declare_parameter("hole_margin", 2.0)        # solid material (mm) required between cup and hole
+        # suction-candidate score weights; only their ratios matter (planner defaults sum to 1)
+        self.declare_parameter("w_angle", 0.25)           # patch faces the camera
+        self.declare_parameter("w_dist", 0.3)             # close to the object centre
+        self.declare_parameter("w_count", 0.05)           # many supporting points under the cup
+        self.declare_parameter("w_flat", 0.4)             # flat surroundings (no bend, rib, crease)
 
         p = lambda name: self.get_parameter(name).value
         roi = p("roi").strip()
@@ -119,7 +124,8 @@ class SuctionNode(Node):
         self.pipe = Seg2GraspPipeline(segmenter, classifier=None, vacuum_radius=float(p("vacuum_radius")),
                                       seal_min=float(p("seal_min")), z_near=z_near, z_far=z_far,
                                       hole_detection=bool(p("hole_detection")),
-                                      hole_margin=float(p("hole_margin")))
+                                      hole_margin=float(p("hole_margin")),
+                                      **{w: float(p(w)) for w in ("w_angle", "w_dist", "w_count", "w_flat")})
 
         self.k_color = self.k_depth = None
         self.depth_frame = None

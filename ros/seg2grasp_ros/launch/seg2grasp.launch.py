@@ -74,6 +74,15 @@ CAMERAS = {
     },
 }
 
+# Suction-point score weights (planner defaults, sum 1): name -> (default, what it rewards).
+# 居中：0.0 1.0 0.0 0.0
+WEIGHTS = {
+    "w_angle": ("0.25", "patch faces the camera"), #0.25
+    "w_dist": ("0.3", "close to the object centre"), #0.3
+    "w_count": ("0.05", "many supporting points under the cup"), #0.05
+    "w_flat": ("0.4", "flat surroundings (no bend, rib or crease)"), #0.4
+}
+
 
 def launch_setup(context):
     choice = LaunchConfiguration("camera").perform(context)
@@ -109,6 +118,8 @@ def launch_setup(context):
                 "z_far": float(z_far),
                 "hole_detection": LaunchConfiguration("hole_detection"),
                 "hole_margin": LaunchConfiguration("hole_margin"),
+                # float even when given as an integer (w_count:=0), the node declares doubles
+                **{w: ParameterValue(LaunchConfiguration(w), value_type=float) for w in WEIGHTS},
             }],
         ))
     return actions
@@ -123,7 +134,7 @@ def generate_launch_description():
         DeclareLaunchArgument("roi", default_value="",
                               description="color-image crop 'y,x,h,w' (empty = full frame); with camera:=both it "
                                           "applies to both cameras"),
-        DeclareLaunchArgument("vacuum_radius", default_value="15.0",
+        DeclareLaunchArgument("vacuum_radius", default_value="13.0",
                               description="suction cup radius (mm); a property of the robot's cup, the same "
                                           "whichever camera looks"),
         DeclareLaunchArgument("seal_min", default_value="0.98",
@@ -145,5 +156,8 @@ def generate_launch_description():
                               description="find holes in the color image and keep the suction cup off them"),
         DeclareLaunchArgument("hole_margin", default_value="2.0",
                               description="solid material (mm) required between the suction cup and a hole"),
+        *[DeclareLaunchArgument(w, default_value=default, description=f"suction-point score weight: {what}; "
+                                                                        "only the ratios of the four weights matter")
+          for w, (default, what) in WEIGHTS.items()],
         OpaqueFunction(function=launch_setup),
     ])

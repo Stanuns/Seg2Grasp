@@ -51,10 +51,14 @@ class Seg2GraspPipeline:
         hole_detection (bool): find through-holes in the color image (see
             :mod:`.grasping.hole_detection`) so the cup is not placed over one.
         hole_margin (float): solid material (mm) required between the cup and a hole.
+        w_angle, w_dist, w_count, w_flat (float): suction-candidate score weights
+            for surface angle, proximity to the object centre, support count and
+            flatness of the surroundings (see :func:`.grasping.suction_planner.score_candidates`).
     """
 
     def __init__(self, segmenter, classifier=None, vacuum_radius=30.0, seal_min=0.98,
-                 z_near=300.0, z_far=1050.0, hole_detection=True, hole_margin=2.0):
+                 z_near=300.0, z_far=1050.0, hole_detection=True, hole_margin=2.0,
+                 w_angle=0.25, w_dist=0.3, w_count=0.05, w_flat=0.4):
         self.segmenter = segmenter
         self.classifier = classifier
         self.vacuum_radius = vacuum_radius
@@ -63,6 +67,7 @@ class Seg2GraspPipeline:
         self.z_far = z_far
         self.hole_detection = hole_detection
         self.hole_margin = hole_margin
+        self.weights = dict(w_angle=w_angle, w_dist=w_dist, w_count=w_count, w_flat=w_flat)
 
     def run(self, rgb, depth, pc, classify=True, visualize=False, rng=None):
         """Run the full pipeline on one frame.
@@ -116,7 +121,8 @@ class Seg2GraspPipeline:
             suction = estimate_suction_point(
                 candidate.pc_crop, mask=candidate.mask_crop, z_near=self.z_near, z_far=self.z_far,
                 vacuum_radius=self.vacuum_radius, seal_min=self.seal_min, holes=holes_crop,
-                hole_margin=self.hole_margin, rng=rng, visualize=visualize, rgb_img=candidate.rgb_crop)
+                hole_margin=self.hole_margin, **self.weights, rng=rng, visualize=visualize,
+                rgb_img=candidate.rgb_crop)
             if suction is not None:
                 target = candidate
                 break
