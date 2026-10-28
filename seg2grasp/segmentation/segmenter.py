@@ -39,9 +39,10 @@ def _boxes_from_masks(masks):
     """
     boxes = np.zeros((len(masks), 4), dtype=np.float32)
     for i, m in enumerate(masks):
-        ys, xs = np.where(m)
-        if len(xs):
-            boxes[i] = [xs.min(), ys.min(), xs.max(), ys.max()]
+        cols = np.flatnonzero(m.any(axis=0))      # row/column projections: ~10x faster than np.where
+        if len(cols):
+            rows = np.flatnonzero(m.any(axis=1))
+            boxes[i] = [cols[0], rows[0], cols[-1], rows[-1]]
     return boxes
 
 
@@ -61,7 +62,7 @@ class Segmenter:
     """Mask2Former class-agnostic instance segmenter (RGB + inverted depth)."""
 
     def __init__(self, config_path=None, weights_path=None, score_threshold=0.5,
-                 device=None, fp16=False, min_size=None, depth_min=300.0):
+                 device=None, fp16=False, min_size=None, depth_min=300.0, input_type=None):
         """
         Args:
             fp16 (bool): run the network under CUDA float16 autocast (~3x faster
@@ -72,6 +73,11 @@ class Segmenter:
             depth_min (float): nearest depth (mm) kept when normalizing the depth
                 input; anything nearer is clipped to it. Lower it for close-range
                 cameras.
+            input_type (str, optional): "rgbd" runs the shared network on the RGB
+                and the depth image and averages them (late fusion); "rgb" runs it
+                on the RGB image only, ~1.8x faster (masks: mean IoU ~0.96 vs rgbd
+                on the demo samples, occasionally an extra mask). Defaults to the
+                config's ``INPUT.INPUT_TYPE``.
         """
         import torch
         from detectron2.config import get_cfg
@@ -98,13 +104,14 @@ class Segmenter:
         cfg.freeze()
         self.cfg = cfg
 
-        self.input_type = cfg.INPUT.INPUT_TYPE          # "rgb" | "rgbd" | "depth"
+        self.input_type = input_type or cfg.INPUT.INPUT_TYPE    # "rgb" | "rgbd" | "depth"
         self.depth_inverted = cfg.INPUT.DEPTH_INVERTED
         self.input_format = cfg.INPUT.FORMAT            # "RGB"
         self.device = cfg.MODEL.DEVICE
 
         self.model = build_model(cfg)
         self.model.eval()
+        self.model.input_type = self.input_type      # the model fuses the depth branch only for "rgbd"
         DetectionCheckpointer(self.model).load(weights_path)
         min_size = min_size or cfg.INPUT.MIN_SIZE_TEST
         self.aug = T.ResizeShortestEdge([min_size, min_size], cfg.INPUT.MAX_SIZE_TEST)
@@ -121,7 +128,9 @@ class Segmenter:
             depth_img = _normalize_depth_for_seg(depth, min_val=self.depth_min)
         else:
             depth_img = depth  # already a normalized 3-channel depth image
-        depth_img = inpaint_depth(depth_img)
+        # Inpaint at 1/4 resolution: ~10x faster on the CPU (92 -> 10 ms at 848x480 on
+        # Jetson Orin NX), masks nearly identical (mean IoU 0.99 on the demo samples).
+        depth_img = inpaint_depth(depth_img, factor=4)
         if self.depth_inverted:
             depth_img = invert_depth(depth_img)
         return depth_img
@@ -168,7 +177,7 @@ class Segmenter:
         # CPU only to discard most of them costs tens of ms per frame.
         instances = outputs["instances"]
         keep = instances.scores > self.score_threshold
-        masks = instances.pred_masks[keep].float().cpu().numpy()
+        masks = instances.pred_masks[keep].bool().cpu().numpy()     # bool: 1/4 of the float32 copy
         if len(masks) == 0:
             return np.empty((0, H, W), bool), np.empty((0, 4)), (rgb.copy() if return_vis else None)
         # Mask2Former is mask-based; derive boxes from the masks (pred_boxes are empty).

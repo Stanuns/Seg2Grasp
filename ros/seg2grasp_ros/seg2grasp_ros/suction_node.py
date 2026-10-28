@@ -88,9 +88,9 @@ class SuctionNode(Node):
         super().__init__("d435i", namespace="seg2grasp")
         self.window = f"Seg2Grasp {self.get_fully_qualified_name()} (q=quit)"
         self.declare_parameter("color_topic", "/d435i/color/image_raw")
-        self.declare_parameter("depth_topic", "/d435i/depth/image_rect_raw")
+        self.declare_parameter("depth_topic", "/d435i/aligned_depth_to_color/image_raw")
         self.declare_parameter("color_info_topic", "/d435i/color/camera_info")
-        self.declare_parameter("depth_info_topic", "/d435i/depth/camera_info")
+        self.declare_parameter("depth_info_topic", "/d435i/aligned_depth_to_color/camera_info")
         self.declare_parameter("roi", "")                 # "y,x,h,w" crop of the color image
         self.declare_parameter("vacuum_radius", 15.0)     # suction cup radius (mm), the robot's ~30 mm cup
         self.declare_parameter("seal_min", 0.98)          # min sealing fraction of the cup disc; 0 = off
@@ -98,6 +98,7 @@ class SuctionNode(Node):
         self.declare_parameter("sync_slop", 0.02)         # color/depth stamp tolerance (s)
         self.declare_parameter("fp16", True)              # float16 inference (~3x faster segmentation)
         self.declare_parameter("seg_min_size", 0)         # segmentation input short edge; 0 = model default (800)
+        self.declare_parameter("seg_input", "rgb")        # segmentation input: rgb (~1.8x faster) or rgbd
         self.declare_parameter("z_near", 300.0)           # depth band (mm) of object points used for grasping
         self.declare_parameter("z_far", 2000.0)
         self.declare_parameter("hole_detection", True)    # find holes in the color image, keep the cup off them
@@ -110,7 +111,11 @@ class SuctionNode(Node):
 
         self.get_logger().info("Loading segmentation model ...")
         z_near, z_far = float(p("z_near")), float(p("z_far"))
-        segmenter = Segmenter(fp16=bool(p("fp16")), min_size=int(p("seg_min_size")) or None, depth_min=z_near)
+        seg_input = p("seg_input")
+        if seg_input not in ("rgb", "rgbd"):
+            raise ValueError(f"seg_input must be 'rgb' or 'rgbd', got {seg_input!r}")
+        segmenter = Segmenter(fp16=bool(p("fp16")), min_size=int(p("seg_min_size")) or None, depth_min=z_near,
+                              input_type=seg_input)
         self.pipe = Seg2GraspPipeline(segmenter, classifier=None, vacuum_radius=float(p("vacuum_radius")),
                                       seal_min=float(p("seal_min")), z_near=z_near, z_far=z_far,
                                       hole_detection=bool(p("hole_detection")),

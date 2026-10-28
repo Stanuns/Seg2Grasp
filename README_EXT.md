@@ -60,7 +60,9 @@ Jetson 上的使用差异：
   |---|---|---|
   | D435i 单开，默认 800 | 约 0.3 Hz | 约 3.2 s |
   | D435i 单开，`seg_min_size:=480` | 约 0.6 Hz | 约 2.2 s |
-  | `camera:=both`，`seg_min_size:=480` | 各约 0.3 Hz | 约 4.5 s |
+  | `camera:=both`，`seg_min_size:=480` | 各约 0.9 Hz | 约 1.3–1.4 s |
+
+  单开两行为早期实测（`seg_input:=rgbd`）。`camera:=both` 一行为当前默认设置的实测：`seg_input:=rgb`、相机 15 fps、D435i 驱动端对齐深度（此前 `rgbd`、30 fps、节点配准时为 0.43 / 0.46 Hz、约 2.6 s）。两个节点共用 GPU，分割是瓶颈；`seg_input:=rgbd` 时每帧 GPU 耗时约翻倍。
 
 - `camera:=both` 时两个模型共占约 13 GB 内存（16 GB 板），运行时请关闭其他程序。
 
@@ -92,7 +94,7 @@ ros2 launch seg2grasp_ros seg2grasp.launch.py roi:=20,140,440,500 vacuum_radius:
 
 | | D435i | Gemini 305 |
 |---|---|---|
-| 相机 topic | `/d435i/color/image_raw`、`/d435i/depth/image_rect_raw` 等 | `/gemini305/color/image_raw`、`/gemini305/depth/image_raw` 等 |
+| 相机 topic | `/d435i/color/image_raw`、`/d435i/aligned_depth_to_color/image_raw` 等 | `/gemini305/color/image_raw`、`/gemini305/depth/image_raw` 等 |
 | TF 坐标系 | `d435i_link`、`d435i_color_optical_frame`、`d435i_depth_optical_frame` 等 | `gemini305_link`、`gemini305_color_optical_frame` 等 |
 | 节点 | `/seg2grasp/d435i` | `/seg2grasp/gemini305` |
 | 吸取点 | `/seg2grasp/d435i/suction_pose`（坐标系 `d435i_color_optical_frame`） | `/seg2grasp/gemini305/suction_pose`（坐标系 `gemini305_color_optical_frame`） |
@@ -108,26 +110,33 @@ ros2 launch seg2grasp_ros seg2grasp.launch.py roi:=20,140,440,500 vacuum_radius:
 ros2 launch realsense2_camera rs_launch.py \
   camera_namespace:=/ camera_name:=d435i \
   pointcloud.enable:=true \
-  depth_module.depth_profile:=848x480x30 \
-  rgb_camera.color_profile:=848x480x30 \
+  depth_module.depth_profile:=848x480x15 \
+  rgb_camera.color_profile:=848x480x15 \
   spatial_filter.enable:=true \
   temporal_filter.enable:=true \
-  hole_filling_filter.enable:=true
+  hole_filling_filter.enable:=true \
+  align_depth.enable:=true
 
 # 终端 1：相机（Gemini 305）
 ros2 launch orbbec_camera gemini_301_series.launch.py \
   camera_name:=gemini305 \
   enable_colored_point_cloud:=true \
-  depth_registration:=true
+  depth_registration:=true \
+  color_width:=848 color_height:=530 color_fps:=15 color_format:=YUYV \
+  depth_width:=848 depth_height:=530 depth_fps:=15
 
 # 终端 2：节点（只启动节点，camera 与终端 1 的相机一致）
 ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false
 ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false camera:=gemini305
-ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false camera:=both
+ros2 launch seg2grasp_ros seg2grasp.launch.py launch_camera:=false camera:=both seg_min_size:=480
 ros2 run seg2grasp_ros suction_node   # 或直接运行节点：/seg2grasp/d435i，订阅 D435i 的 topic
 ```
 
 相机必须带上 `camera_name`（D435i 还需 `camera_namespace:=/`），topic 和坐标系才是上表中的名字。
+
+两台相机都以 15 fps 运行：节点每秒只处理约 1 帧，多余的帧仍要在节点里反序列化、做彩色/深度同步，占用 CPU。Gemini 305 需显式写 `color_format:=YUYV`，否则驱动在 15 fps 下会选 MJPG（多一道解码）。
+
+D435i 需 `align_depth.enable:=true`：节点订阅 `/d435i/aligned_depth_to_color/image_raw`（驱动已对齐到彩色图），不再自己做深度配准（Jetson 上每帧约 95 ms）。若相机未开启对齐，节点会一直等待该 topic；此时可改回 `-p depth_topic:=/d435i/depth/image_rect_raw -p depth_info_topic:=/d435i/depth/camera_info`，由节点配准。
 
 Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开 `depth_registration`（这里也显式写出）：`/gemini305/depth/image_raw` 已对齐到彩色图（坐标系 `gemini305_color_optical_frame`，分辨率与彩色图相同），节点直接使用，不再做深度配准。
 
@@ -140,6 +149,7 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 | `seal_min` | 密封检查阈值：吸盘圆盘内能密封的像素比例下限，默认 0.98；设为 0 关闭检查 |
 | `show` | 是否显示结果窗口，默认 `true` |
 | `fp16` | 分割模型用 float16 推理，默认 `true`（比 float32 快约 3 倍，结果几乎相同） |
+| `seg_input` | 分割网络的输入：`rgb`（默认，只用彩色图）或 `rgbd`（彩色图和深度图各跑一遍网络再融合）。`rgb` 的 GPU 耗时约为 `rgbd` 的一半；在示例场景上两者的掩码平均 IoU 约 0.96，`rgb` 偶尔多分出几个物体。若出现漏分、粘连，改回 `rgbd` |
 | `seg_min_size` | 分割输入图像短边像素，默认 `0`（即模型默认 800）；设为 600 / 480 更快，但分割更粗 |
 | `z_near` / `z_far` | 抓取使用的物体深度范围（mm），范围外的点被忽略；留空则按相机取默认值：`d435i` 为 300 / 2000，`gemini305` 为 70 / 500 |
 | `hole_detection` | 用彩色图识别工件上的孔洞，吸盘不覆盖孔洞，默认 `true`（见下文"孔洞识别"） |
@@ -150,9 +160,9 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 | 节点参数 | D435i（默认） | Gemini 305 |
 |---|---|---|
 | `color_topic` | `/d435i/color/image_raw` | `/gemini305/color/image_raw` |
-| `depth_topic` | `/d435i/depth/image_rect_raw` | `/gemini305/depth/image_raw` |
+| `depth_topic` | `/d435i/aligned_depth_to_color/image_raw` | `/gemini305/depth/image_raw` |
 | `color_info_topic` | `/d435i/color/camera_info` | `/gemini305/color/camera_info` |
-| `depth_info_topic` | `/d435i/depth/camera_info` | `/gemini305/depth/camera_info` |
+| `depth_info_topic` | `/d435i/aligned_depth_to_color/camera_info` | `/gemini305/depth/camera_info` |
 | `z_near` | `300.0` | `70.0` |
 | `z_far` | `2000.0` | `500.0` |
 
@@ -163,7 +173,9 @@ Gemini 305 启动时 `enable_colored_point_cloud:=true` 会让驱动自动打开
 - 节点始终处理**最新**的一帧：处理期间到达的帧会被丢弃，处理完立即取下一帧最新数据。
 - 两段流水线：后台线程分割新一帧的同时，主线程规划上一帧的吸取点。默认设置下单台相机的 `suction_pose` 约 2 Hz、单帧延迟约 0.6 s（RTX 5080 Laptop 实测）；`seg_min_size:=600` 约 2.5 Hz，`480` 约 2.8 Hz。
 - 每处理完一帧就刷新结果窗口，窗口始终显示最新结果（左下角显示输出频率和延迟）。
-- 深度图会用两个相机的内参和 TF 外参自动对齐到彩色图；若深度已与彩色图对齐（坐标系和分辨率都相同），则跳过对齐。D435i 若启用了 `align_depth.enable:=true`，将 `depth_topic` 设为 `/d435i/aligned_depth_to_color/image_raw` 即可；Gemini 305 按上面的方式启动时深度已对齐。
+- 若深度已与彩色图对齐（坐标系和分辨率都相同），节点直接使用；按上面的方式启动时两台相机都是这种情况（D435i `align_depth.enable:=true`，Gemini 305 `depth_registration:=true`）。否则用两个相机的内参和 TF 外参自动对齐到彩色图。
+- `seg_input:=rgbd` 时，分割网络的深度输入在 1/4 分辨率上修补空洞（Jetson 上 92 → 10 ms，掩码与全分辨率修补几乎相同）；只影响网络输入，规划用的点云不受影响。
+- 分割后的掩码清理（去重合并、外接框）只在掩码外接框的交集内计算重叠，结果与逐像素全图计算完全相同，掩码多时（如 Gemini 305 近距离 20 多个）每帧从约 400 ms 降到约 40 ms。
 
 ## 输出
 
