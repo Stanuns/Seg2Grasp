@@ -103,6 +103,7 @@ class SuctionNode(Node):
         self.declare_parameter("z_far", 2000.0)
         self.declare_parameter("hole_detection", True)    # find holes in the color image, keep the cup off them
         self.declare_parameter("hole_margin", 2.0)        # solid material (mm) required between cup and hole
+        self.declare_parameter("target_area_weight", 0.5)  # 0..1: rank objects by elevation (0) .. mask area (1)
         # suction-candidate score weights; only their ratios matter (planner defaults sum to 1)
         self.declare_parameter("w_angle", 0.25)           # patch faces the camera
         self.declare_parameter("w_dist", 0.3)             # close to the object centre
@@ -125,6 +126,7 @@ class SuctionNode(Node):
                                       seal_min=float(p("seal_min")), z_near=z_near, z_far=z_far,
                                       hole_detection=bool(p("hole_detection")),
                                       hole_margin=float(p("hole_margin")),
+                                      target_area_weight=float(p("target_area_weight")),
                                       **{w: float(p(w)) for w in ("w_angle", "w_dist", "w_count", "w_flat")})
 
         self.k_color = self.k_depth = None

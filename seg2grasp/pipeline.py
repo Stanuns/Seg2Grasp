@@ -51,6 +51,9 @@ class Seg2GraspPipeline:
         hole_detection (bool): find through-holes in the color image (see
             :mod:`.grasping.hole_detection`) so the cup is not placed over one.
         hole_margin (float): solid material (mm) required between the cup and a hole.
+        target_area_weight (float): weight (0..1) of the mask area when ranking
+            the objects; 0 = most elevated object first (see
+            :func:`.grasping.target_selection.rank_targets`).
         w_angle, w_dist, w_count, w_flat (float): suction-candidate score weights
             for surface angle, proximity to the object centre, support count and
             flatness of the surroundings (see :func:`.grasping.suction_planner.score_candidates`).
@@ -58,7 +61,7 @@ class Seg2GraspPipeline:
 
     def __init__(self, segmenter, classifier=None, vacuum_radius=30.0, seal_min=0.98,
                  z_near=300.0, z_far=1050.0, hole_detection=True, hole_margin=2.0,
-                 w_angle=0.25, w_dist=0.3, w_count=0.05, w_flat=0.4):
+                 target_area_weight=0.0, w_angle=0.25, w_dist=0.3, w_count=0.05, w_flat=0.4):
         self.segmenter = segmenter
         self.classifier = classifier
         self.vacuum_radius = vacuum_radius
@@ -67,6 +70,7 @@ class Seg2GraspPipeline:
         self.z_far = z_far
         self.hole_detection = hole_detection
         self.hole_margin = hole_margin
+        self.target_area_weight = target_area_weight
         self.weights = dict(w_angle=w_angle, w_dist=w_dist, w_count=w_count, w_flat=w_flat)
 
     def run(self, rgb, depth, pc, classify=True, visualize=False, rng=None):
@@ -97,10 +101,11 @@ class Seg2GraspPipeline:
         if masks is None or len(masks) == 0:
             return None
 
-        # Most elevated object first; if the cup cannot seal anywhere on it (e.g. a
-        # small or curved object), fall back to the next most elevated one. Objects
-        # outside the depth band are skipped (e.g. the robot's own gripper in view of
-        # a wrist camera): their masks can bleed onto the background behind them.
+        # Most elevated object first (weighing in its area with target_area_weight);
+        # if the cup cannot seal anywhere on it (e.g. a small or curved object), fall
+        # back to the next one. Objects outside the depth band are skipped (e.g. the
+        # robot's own gripper in view of a wrist camera): their masks can bleed onto
+        # the background behind them.
         # Holes are seen in the color image against the background, i.e. the pixels
         # outside every object's mask.
         model = None
@@ -109,9 +114,8 @@ class Seg2GraspPipeline:
             background = ~np.any(np.asarray(masks, bool), axis=0)
 
         target = suction = holes = None
-        for candidate in rank_targets(masks, bboxes, pc, rgb_img=rgb):
-            if not self.z_near < candidate.centroid[2] < self.z_far:
-                continue
+        for candidate in rank_targets(masks, bboxes, pc, rgb_img=rgb, area_weight=self.target_area_weight,
+                                      z_range=(self.z_near, self.z_far)):
             holes = holes_crop = None
             if model is not None:
                 holes = detect_holes(rgb, masks[candidate.index], background,
